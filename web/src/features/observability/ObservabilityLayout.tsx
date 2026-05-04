@@ -12,6 +12,7 @@ export function ObservabilityLayout() {
       <TabNav
         items={[
           { to: `/app/projects/${pid}/observability/logs`, label: t('nav.logs') },
+          { to: `/app/projects/${pid}/observability/traces`, label: t('observability.traces', 'Traces') },
           { to: `/app/projects/${pid}/observability/metrics`, label: t('nav.metrics') },
         ]}
       />

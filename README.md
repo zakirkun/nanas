@@ -38,7 +38,7 @@ flowchart LR
 Requirements:
 
 - Docker and Docker Compose
-- Go 1.22+ for local development
+- Go 1.24+ for local development
 
 Start the local stack:
 
@@ -107,6 +107,7 @@ Once configured, callers invoke `POST /fn/{project_slug}/{function_slug}` with a
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string for platform metadata. |
+| Schema migrations | Embedded under [`internal/migrate/sql`](internal/migrate/sql) as [golang-migrate](https://github.com/golang-migrate/migrate) `*.up.sql` / `*.down.sql` pairs. Applied at API startup; ledger table `platform_schema_migrations`. Older dev DBs may still have legacy `schema_migrations(filename)` — safe to drop manually. |
 | `TENANT_DB_SUPER_URL` | Optional PostgreSQL superuser connection string for tenant `CREATE DATABASE`. If unset, `DATABASE_URL` is used and must have `CREATEDB` privileges. |
 | `TENANT_DB_HOST` | Host and port used when building tenant database URLs for API and dataplane access. |
 | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_USE_SSL` | S3-compatible object storage settings. |

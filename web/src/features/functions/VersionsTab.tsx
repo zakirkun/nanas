@@ -2,25 +2,30 @@ import { useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { format } from 'date-fns';
-import { FileUp, Loader2, Upload, Plus, Trash2 } from 'lucide-react';
+import { FileUp, Loader2, Upload, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ProblemAlert } from '@/components/data/ProblemAlert';
 import { EmptyState } from '@/components/data/EmptyState';
-import { useLocalCache } from '@/hooks/useLocalCache';
-import { removeCached } from '@/lib/localCache';
-import { usePresignArtifact, useRegisterVersion } from './queries';
+import { useFunctionVersions, usePresignArtifact, useRegisterVersion } from './queries';
 
 export function VersionsTab() {
   const { t } = useTranslation();
   const { pid, fid } = useParams();
-  const versions = useLocalCache(`versions:${fid}`, pid);
+  const versions = useFunctionVersions(pid, fid);
   const [version, setVersion] = useState('');
   const [runtime, setRuntime] = useState<'go' | 'node' | 'python'>('node');
   const [checksum, setChecksum] = useState('');
@@ -87,7 +92,7 @@ export function VersionsTab() {
           <CardTitle className="text-base">{t('functions.versions.newVersion')}</CardTitle>
           <CardDescription>
             Step 1: presign + upload artifact tarball. Step 2: register the version (build queues
-            automatically).
+            automatically). For in-browser authoring use the Editor tab.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -153,7 +158,11 @@ export function VersionsTab() {
               onClick={presignAndUpload}
               disabled={!file || !version || presign.isPending || progress !== null}
             >
-              {progress !== null ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+              {progress !== null ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="mr-2 h-4 w-4" />
+              )}
               {t('functions.versions.presignFirst')} {progress !== null ? `${progress}%` : ''}
             </Button>
             <Button onClick={onRegister} disabled={!version || register.isPending}>
@@ -169,40 +178,46 @@ export function VersionsTab() {
           <CardTitle className="text-base">{t('functions.versions.title')}</CardTitle>
         </CardHeader>
         <CardContent>
-          {versions.length === 0 ? (
+          {versions.isLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : (versions.data ?? []).length === 0 ? (
             <EmptyState title={t('common.empty')} />
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('functions.versions.version')}</TableHead>
-                  <TableHead>{t('common.id')}</TableHead>
+                  <TableHead>{t('functions.versions.runtime')}</TableHead>
+                  <TableHead>{t('functions.versions.checksum')}</TableHead>
                   <TableHead>{t('functions.versions.buildStatus')}</TableHead>
                   <TableHead>{t('common.createdAt')}</TableHead>
-                  <TableHead className="text-right">{t('common.actions')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {versions.map((v) => (
+                {(versions.data ?? []).map((v) => (
                   <TableRow key={v.id}>
-                    <TableCell className="font-mono">{v.name ?? '—'}</TableCell>
-                    <TableCell className="font-mono text-xs">{v.id.slice(0, 8)}</TableCell>
+                    <TableCell className="font-mono">v{v.version}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">
-                        {String((v.meta as { build_status?: string } | undefined)?.build_status ?? '?')}
+                      <Badge variant="outline">{v.runtime}</Badge>
+                    </TableCell>
+                    <TableCell className="max-w-[200px] truncate font-mono text-xs">
+                      <span title={v.checksum}>{v.checksum}</span>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          v.build_status === 'complete'
+                            ? 'success'
+                            : v.build_status === 'failed'
+                              ? 'destructive'
+                              : 'info'
+                        }
+                      >
+                        {v.build_status}
                       </Badge>
                     </TableCell>
                     <TableCell className="font-mono text-xs">
-                      {format(new Date(v.ts), 'yyyy-MM-dd HH:mm')}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => pid && removeCached(`versions:${fid}`, pid, v.id)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {format(new Date(v.created_at), 'yyyy-MM-dd HH:mm')}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -214,4 +229,3 @@ export function VersionsTab() {
     </div>
   );
 }
-

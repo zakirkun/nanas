@@ -13,6 +13,7 @@ import {
   ShieldCheck,
   LayoutDashboard,
   Users,
+  Plug,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSession } from '@/auth/session';
@@ -33,6 +34,7 @@ export function Sidebar({ projectId }: SidebarProps) {
         { to: `/app/projects/${projectId}/storage`, label: t('nav.storage'), icon: HardDrive },
         { to: `/app/projects/${projectId}/functions`, label: t('nav.functions'), icon: Code2 },
         { to: `/app/projects/${projectId}/triggers`, label: t('nav.triggers'), icon: Webhook },
+        { to: `/app/projects/${projectId}/integrations`, label: t('nav.integrations', 'Integrations'), icon: Plug },
         { to: `/app/projects/${projectId}/realtime`, label: t('nav.realtime'), icon: Radio },
         { to: `/app/projects/${projectId}/observability`, label: t('nav.observability'), icon: Activity },
         { to: `/app/projects/${projectId}/audit`, label: t('nav.audit'), icon: ScrollText },

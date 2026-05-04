@@ -30,5 +30,8 @@ test.describe('Nanas SPA smoke', () => {
 
     await page.waitForURL(/\/app\/projects\/[0-9a-f-]+/, { timeout: 30_000 });
     await expect(page.getByRole('heading', { name: /e2e smoke project/i })).toBeVisible();
+
+    await page.getByRole('link', { name: /^functions$|^fungsi$/i }).click();
+    await expect(page.getByRole('heading', { name: /functions|fungsi/i })).toBeVisible();
   });
 });

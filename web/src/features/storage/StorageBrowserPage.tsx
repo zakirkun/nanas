@@ -1,17 +1,23 @@
 import { useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useMutation } from '@tanstack/react-query';
-import { Upload, Download, FileUp, Loader2, ExternalLink } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { Upload, Download, FileUp, Loader2, Trash2, RefreshCw, Folder } from 'lucide-react';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
 import { ProblemAlert } from '@/components/data/ProblemAlert';
 import { CopyButton } from '@/components/data/CopyButton';
-import { api } from '@/api/client';
+import { EmptyState } from '@/components/data/EmptyState';
+import { api, rawFetch } from '@/api/client';
+import { isProblem, ProblemError } from '@/api/problem';
 import { validateObjectKey } from '@/lib/objectKey';
 import { formatBytes, cn } from '@/lib/utils';
 
@@ -23,23 +29,30 @@ interface PresignResponse {
   bucket?: string;
 }
 
+interface StoredObject {
+  key: string;
+  size: number;
+  etag: string;
+  content_type?: string;
+  last_modified?: string;
+}
+
 export function StorageBrowserPage() {
   const { t } = useTranslation();
   const { pid } = useParams();
 
   return (
     <div>
-      <PageHeader title={t('storage.title')} description={t('storage.keyHelper')} />
-      <div className="grid gap-4 lg:grid-cols-2">
-        <UploadCard pid={pid!} />
-        <DownloadCard pid={pid!} />
-      </div>
+      <PageHeader title={t('storage.title')} description="GET /v1/projects/:pid/storage/objects" />
+      <UploadCard pid={pid!} />
+      <ObjectsCard pid={pid!} />
     </div>
   );
 }
 
 function UploadCard({ pid }: { pid: string }) {
   const { t } = useTranslation();
+  const qc = useQueryClient();
   const [key, setKey] = useState('');
   const [expires, setExpires] = useState(3600);
   const [file, setFile] = useState<File | null>(null);
@@ -86,6 +99,7 @@ function UploadCard({ pid }: { pid: string }) {
       });
       toast.success(t('storage.uploadDone'));
       setProgress(null);
+      qc.invalidateQueries({ queryKey: ['storage', pid] });
     } catch (e) {
       toast.error(t('storage.uploadFailed'));
       setError(e);
@@ -94,7 +108,7 @@ function UploadCard({ pid }: { pid: string }) {
   };
 
   return (
-    <Card>
+    <Card className="mb-4">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Upload className="h-4 w-4" /> {t('storage.uploadTitle')}
@@ -103,25 +117,27 @@ function UploadCard({ pid }: { pid: string }) {
       </CardHeader>
       <CardContent className="space-y-3">
         {error ? <ProblemAlert error={error} /> : null}
-        <div className="space-y-1.5">
-          <Label htmlFor="up-key">{t('storage.keyLabel')}</Label>
-          <Input
-            id="up-key"
-            placeholder="documents/report.pdf"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-          />
-          {keyErr ? <p className="text-xs text-destructive">{keyErr}</p> : null}
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="up-expires">{t('storage.expirySeconds')}</Label>
-          <Input
-            id="up-expires"
-            type="number"
-            min={60}
-            value={expires}
-            onChange={(e) => setExpires(Number(e.target.value || 3600))}
-          />
+        <div className="grid gap-3 md:grid-cols-[1fr_180px]">
+          <div className="space-y-1.5">
+            <Label htmlFor="up-key">{t('storage.keyLabel')}</Label>
+            <Input
+              id="up-key"
+              placeholder="documents/report.pdf"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+            />
+            {keyErr ? <p className="text-xs text-destructive">{keyErr}</p> : null}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="up-expires">{t('storage.expirySeconds')}</Label>
+            <Input
+              id="up-expires"
+              type="number"
+              min={60}
+              value={expires}
+              onChange={(e) => setExpires(Number(e.target.value || 3600))}
+            />
+          </div>
         </div>
         <div
           className={cn(
@@ -166,9 +182,7 @@ function UploadCard({ pid }: { pid: string }) {
             disabled={presign.isPending || !key.trim() || !!keyErr}
             variant="outline"
           >
-            {presign.isPending ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : null}
+            {presign.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             {t('storage.createPresign')}
           </Button>
           <Button onClick={upload} disabled={!presigned?.upload_url || !file || progress !== null}>
@@ -176,91 +190,154 @@ function UploadCard({ pid }: { pid: string }) {
             {t('storage.uploadButton')} {progress !== null ? `${progress}%` : null}
           </Button>
         </div>
-        {presigned?.upload_url ? (
-          <div className="rounded-md border bg-muted/30 p-3 text-xs">
-            <div className="flex items-center justify-between gap-2">
-              <code className="break-all font-mono">{presigned.upload_url.slice(0, 90)}…</code>
-              <CopyButton value={presigned.upload_url} />
-            </div>
-          </div>
-        ) : null}
       </CardContent>
     </Card>
   );
 }
 
-function DownloadCard({ pid }: { pid: string }) {
+function ObjectsCard({ pid }: { pid: string }) {
   const { t } = useTranslation();
-  const [key, setKey] = useState('');
-  const [expires, setExpires] = useState(3600);
-  const [error, setError] = useState<unknown>(null);
-  const [url, setUrl] = useState<string | null>(null);
-  const keyErr = key ? validateObjectKey(key) : null;
+  const qc = useQueryClient();
+  const [prefix, setPrefix] = useState('');
+  const [appliedPrefix, setAppliedPrefix] = useState('');
 
-  const presign = useMutation({
-    mutationFn: async () => {
-      const { data, error: err } = await api.POST('/v1/projects/{pid}/storage/download', {
-        params: { path: { pid } },
-        body: { key, expires } as { key: string; expires: number },
+  const objects = useQuery({
+    queryKey: ['storage', pid, appliedPrefix],
+    queryFn: async () => {
+      const { data, error } = await api.GET('/v1/projects/{pid}/storage/objects', {
+        params: { path: { pid }, query: { prefix: appliedPrefix, limit: 500 } },
       });
-      if (err) throw err;
-      return data as PresignResponse;
+      if (error) throw error;
+      return ((data as { objects?: StoredObject[] } | undefined)?.objects ?? []) as StoredObject[];
     },
-    onSuccess: (d) => {
-      setUrl(d.download_url ?? d.url ?? null);
-      setError(null);
+  });
+
+  const presignDownload = useMutation({
+    mutationFn: async (key: string) => {
+      const { data, error } = await api.POST('/v1/projects/{pid}/storage/download', {
+        params: { path: { pid } },
+        body: { key, expires: 3600 } as { key: string; expires: number },
+      });
+      if (error) throw error;
+      const url = (data as { download_url?: string; url?: string } | undefined) ?? {};
+      return url.download_url ?? url.url ?? '';
     },
-    onError: (e) => setError(e),
+    onSuccess: (url) => {
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: async (key: string) => {
+      // The DELETE route accepts the key as a path suffix.
+      const path = `/v1/projects/${pid}/storage/objects/${encodeURI(key)}`;
+      const res = await rawFetch(path, { method: 'DELETE' });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        if (isProblem(body)) throw new ProblemError(res.status, body);
+        throw new Error('Failed');
+      }
+      return body;
+    },
+    onSuccess: () => {
+      toast.success(t('common.deleteSucceeded'));
+      qc.invalidateQueries({ queryKey: ['storage', pid] });
+    },
   });
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Download className="h-4 w-4" /> {t('storage.downloadTitle')}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error ? <ProblemAlert error={error} /> : null}
-        <div className="space-y-1.5">
-          <Label htmlFor="dl-key">{t('storage.keyLabel')}</Label>
-          <Input
-            id="dl-key"
-            placeholder="documents/report.pdf"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-          />
-          {keyErr ? <p className="text-xs text-destructive">{keyErr}</p> : null}
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="dl-expires">{t('storage.expirySeconds')}</Label>
-          <Input
-            id="dl-expires"
-            type="number"
-            min={60}
-            value={expires}
-            onChange={(e) => setExpires(Number(e.target.value || 3600))}
-          />
-        </div>
-        <Button onClick={() => presign.mutate()} disabled={!key.trim() || !!keyErr}>
-          {t('storage.createPresign')}
-        </Button>
-        {url ? (
-          <div className="space-y-2">
-            <div className="rounded-md border bg-muted/30 p-3 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <code className="break-all font-mono">{url.slice(0, 90)}…</code>
-                <CopyButton value={url} />
-              </div>
-            </div>
-            <Button asChild variant="secondary">
-              <a href={url} target="_blank" rel="noreferrer">
-                <ExternalLink className="mr-2 h-4 w-4" /> {t('storage.downloadButton')}
-              </a>
+        <CardTitle className="flex items-center justify-between text-base">
+          <span className="flex items-center gap-2">
+            <Folder className="h-4 w-4" /> Objects
+          </span>
+          <div className="flex items-center gap-2">
+            <Input
+              value={prefix}
+              onChange={(e) => setPrefix(e.target.value)}
+              placeholder="prefix/"
+              className="h-8 w-48 font-mono text-xs"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setAppliedPrefix(prefix)}
+              disabled={objects.isLoading}
+            >
+              <RefreshCw className="mr-2 h-3.5 w-3.5" /> Apply
             </Button>
           </div>
-        ) : null}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {objects.error ? <ProblemAlert error={objects.error} /> : null}
+        {objects.isLoading ? (
+          <Skeleton className="h-32 w-full" />
+        ) : (objects.data ?? []).length === 0 ? (
+          <EmptyState
+            icon={<Folder className="h-8 w-8" />}
+            title="No objects found"
+            description={appliedPrefix ? `No keys starting with ${appliedPrefix}.` : 'Upload one above.'}
+          />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>key</TableHead>
+                <TableHead>size</TableHead>
+                <TableHead>etag</TableHead>
+                <TableHead>last modified</TableHead>
+                <TableHead className="text-right">{t('common.actions')}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(objects.data ?? []).map((obj) => (
+                <TableRow key={obj.key}>
+                  <TableCell className="font-mono text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate" title={obj.key}>
+                        {obj.key}
+                      </span>
+                      <CopyButton value={obj.key} label="" />
+                    </div>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{formatBytes(obj.size)}</TableCell>
+                  <TableCell className="max-w-[140px] truncate font-mono text-[11px]">
+                    <Badge variant="outline">{obj.etag.slice(1, 9)}</Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {obj.last_modified
+                      ? format(new Date(obj.last_modified), 'yyyy-MM-dd HH:mm')
+                      : '—'}
+                  </TableCell>
+                  <TableCell className="space-x-1 text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => presignDownload.mutate(obj.key)}
+                      disabled={presignDownload.isPending}
+                    >
+                      <Download className="mr-2 h-3.5 w-3.5" /> {t('storage.downloadButton')}
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => {
+                        if (window.confirm(`Delete ${obj.key}?`)) remove.mutate(obj.key);
+                      }}
+                      disabled={remove.isPending}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </CardContent>
     </Card>
   );
 }
+

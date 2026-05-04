@@ -16,18 +16,20 @@ import (
 const streamTriggers = "platform_triggers"
 const streamDLQ = "platform_dlq"
 const subjDispatch = "triggers.dispatch"
+const subjAsyncInvoke = "functions.async.invoke"
 const subjDLQ = "triggers.dlq"
 
 type Bus struct {
-	nc      *nats_lib.Conn
-	js      jetstream.JetStream
-	consume jetstream.ConsumeContext
-	cancel  context.CancelFunc
+	nc       *nats_lib.Conn
+	js       jetstream.JetStream
+	consumes []jetstream.ConsumeContext
+	cancel   context.CancelFunc
 }
 
 type BusOpts struct {
-	OnDispatch func([]byte)
-	OnDLQ      func(ctx context.Context, projectID uuid.UUID, payload []byte, reason string)
+	OnDispatch    func([]byte)
+	OnAsyncInvoke func([]byte)
+	OnDLQ         func(ctx context.Context, projectID uuid.UUID, payload []byte, reason string)
 }
 
 func Connect(parent context.Context, cfg config.Config, opts BusOpts) (*Bus, error) {
@@ -49,7 +51,7 @@ func Connect(parent context.Context, cfg config.Config, opts BusOpts) (*Bus, err
 
 	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     streamTriggers,
-		Subjects: []string{subjDispatch},
+		Subjects: []string{subjDispatch, subjAsyncInvoke},
 	}); err != nil {
 		cancel()
 		nc.Close()
@@ -74,20 +76,26 @@ func Connect(parent context.Context, cfg config.Config, opts BusOpts) (*Bus, err
 
 	const maxAttempts = 5
 
-	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       "dispatch_worker",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxDeliver:    maxAttempts,
-		BackOff:       []time.Duration{500 * time.Millisecond, 2 * time.Second, 10 * time.Second},
-		FilterSubject: subjDispatch,
-	})
-	if err != nil {
-		cancel()
-		nc.Close()
-		return nil, err
+	startConsumer := func(name, filter string, handler func(jetstream.Msg)) error {
+		consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+			Durable:       name,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			MaxDeliver:    maxAttempts,
+			BackOff:       []time.Duration{500 * time.Millisecond, 2 * time.Second, 10 * time.Second},
+			FilterSubject: filter,
+		})
+		if err != nil {
+			return err
+		}
+		cc, err := consumer.Consume(handler)
+		if err != nil {
+			return err
+		}
+		b.consumes = append(b.consumes, cc)
+		return nil
 	}
 
-	cc, err := consumer.Consume(func(msg jetstream.Msg) {
+	if err := startConsumer("dispatch_worker", subjDispatch, func(msg jetstream.Msg) {
 		md, mdErr := msg.Metadata()
 		if mdErr != nil {
 			_ = msg.NakWithDelay(time.Second)
@@ -116,13 +124,24 @@ func Connect(parent context.Context, cfg config.Config, opts BusOpts) (*Bus, err
 		if err := msg.Ack(); err != nil {
 			slog.Warn("js_ack", "err", err)
 		}
-	})
-	if err != nil {
+	}); err != nil {
 		cancel()
 		nc.Close()
 		return nil, err
 	}
-	b.consume = cc
+
+	if err := startConsumer("async_invoke_worker", subjAsyncInvoke, func(msg jetstream.Msg) {
+		if opts.OnAsyncInvoke != nil {
+			opts.OnAsyncInvoke(msg.Data())
+		}
+		if err := msg.Ack(); err != nil {
+			slog.Warn("js_ack_async", "err", err)
+		}
+	}); err != nil {
+		cancel()
+		nc.Close()
+		return nil, err
+	}
 
 	return b, nil
 }
@@ -156,8 +175,10 @@ func (b *Bus) Close() {
 	if b.cancel != nil {
 		b.cancel()
 	}
-	if b.consume != nil {
-		b.consume.Drain()
+	for _, c := range b.consumes {
+		if c != nil {
+			c.Drain()
+		}
 	}
 	if b.nc != nil {
 		b.nc.Close()
@@ -173,6 +194,19 @@ func (b *Bus) PublishTriggerDispatch(ctx context.Context, payload map[string]any
 		return err
 	}
 	_, err = b.js.Publish(ctx, subjDispatch, raw)
+	return err
+}
+
+// PublishAsyncFunctionInvoke enqueues a background invoke job (PRD Phase 16).
+func (b *Bus) PublishAsyncFunctionInvoke(ctx context.Context, payload map[string]any) error {
+	if b == nil || b.js == nil {
+		return nil
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = b.js.Publish(ctx, subjAsyncInvoke, raw)
 	return err
 }
 

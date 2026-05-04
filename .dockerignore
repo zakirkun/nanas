@@ -1,0 +1,5 @@
+# Host node_modules (esp. pnpm symlinks from Windows) must not overwrite
+# the Linux install from `RUN pnpm install` in the web build stage.
+**/node_modules
+web/dist
+.git

@@ -16,6 +16,7 @@ both the SPA and the API.
 - CodeMirror 6 (SQL/JSON/JS editors)
 - Recharts (per-project metrics)
 - Zustand (session store)
+- `cmdk` (⌘K global search palette) and `react-hotkeys-hook` (function-detail shortcuts)
 - Vitest + Playwright for tests
 
 ## Getting started
@@ -52,6 +53,13 @@ Copy `.env.example` to `.env` and tweak as needed.
 | `pnpm e2e` | Playwright smoke test (requires running stack) |
 | `pnpm lint` | ESLint over `src/` |
 | `pnpm format` | Prettier over `src/` |
+
+## PRD-aligned UI surfaces
+
+- **Integrations** (`/app/projects/:pid/integrations`): configure SendGrid and send a test email.
+- **Migrate** tab lists `GET /v1/projects/:pid/migrations` history next to the DDL editor.
+- **Overview** project tab: quick-start curl/JS/Flutter-style snippets, live realtime event feed, and latest API keys.
+- **Top bar**: project region badge, realtime notification popover, quick “New” menu, global search.
 
 ## Architecture notes
 

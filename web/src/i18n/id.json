@@ -43,7 +43,8 @@
     "loadFailed": "Gagal memuat data.",
     "saveSucceeded": "Tersimpan.",
     "deleteSucceeded": "Terhapus.",
-    "comingSoon": "Segera hadir."
+    "comingSoon": "Segera hadir.",
+    "more": "Lainnya"
   },
   "nav": {
     "overview": "Ikhtisar",
@@ -64,7 +65,8 @@
     "admin": "Admin",
     "adminUsers": "Pengguna",
     "adminProjects": "Semua proyek",
-    "graphql": "GraphQL"
+    "graphql": "GraphQL",
+    "integrations": "Integrasi"
   },
   "auth": {
     "loginTitle": "Masuk ke Nanas",
@@ -131,6 +133,33 @@
       "tableNameHint": "Gunakan identifier huruf kecil, dipisahkan koma."
     }
   },
+  "topbar": {
+    "searchPlaceholder": "Cari…",
+    "searchTitle": "Lompat ke…",
+    "notifications": "Alur realtime",
+    "quickMenu": "Baru",
+    "quickNewProject": "Proyek baru",
+    "quickNewTrigger": "Pemicu baru",
+    "quickMintKey": "Buat kunci API"
+  },
+  "overview": {
+    "quickStart": "Quick start",
+    "replaceKey": "Ganti dengan kunci API sungguhan dari tab Kunci.",
+    "recentEvents": "Peristiwa realtime terbaru",
+    "manageKeys": "Kelola semua",
+    "noKeys": "Belum ada kunci aktif."
+  },
+  "integrations": {
+    "title": "Integrasi",
+    "subtitle": "Email dan adaptor lain.",
+    "sendgridHelp": "Kunci API dienkripsi saat diam jika TENANT_SECRET_ENCRYPTION_KEY disetel di server API.",
+    "configured": "Baris integrasi tersimpan untuk proyek ini.",
+    "testSend": "Uji kirim"
+  },
+  "settings": {
+    "auditRecent": "Audit terbaru",
+    "auditViewAll": "Lihat semua"
+  },
   "database": {
     "migrate": "Migrasi",
     "query": "Kueri",
@@ -144,7 +173,8 @@
     "applied": "Migrasi diterapkan.",
     "rowsAffected": "baris terpengaruh",
     "noRows": "Tidak ada baris dikembalikan.",
-    "tablesEmpty": "Belum ada tabel di daftar izin data."
+    "tablesEmpty": "Belum ada tabel di daftar izin data.",
+    "migrationHistory": "Riwayat migrasi"
   },
   "storage": {
     "title": "Penyimpanan objek",
@@ -193,7 +223,8 @@
     "invoke": {
       "title": "Panggil",
       "bodyLabel": "Body (JSON)",
-      "go": "Panggil"
+      "go": "Panggil",
+      "async": "Async (antre)"
     },
     "entrypoint": {
       "title": "Entrypoint publik",

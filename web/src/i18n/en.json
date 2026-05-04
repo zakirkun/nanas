@@ -43,7 +43,8 @@
     "loadFailed": "Failed to load data.",
     "saveSucceeded": "Saved.",
     "deleteSucceeded": "Deleted.",
-    "comingSoon": "Coming soon."
+    "comingSoon": "Coming soon.",
+    "more": "More"
   },
   "nav": {
     "overview": "Overview",
@@ -64,7 +65,8 @@
     "admin": "Admin",
     "adminUsers": "Users",
     "adminProjects": "All projects",
-    "graphql": "GraphQL"
+    "graphql": "GraphQL",
+    "integrations": "Integrations"
   },
   "auth": {
     "loginTitle": "Sign in to Nanas",
@@ -131,6 +133,33 @@
       "tableNameHint": "Use lowercase identifiers, separated by commas."
     }
   },
+  "topbar": {
+    "searchPlaceholder": "Search…",
+    "searchTitle": "Jump to…",
+    "notifications": "Realtime feed",
+    "quickMenu": "New",
+    "quickNewProject": "New project",
+    "quickNewTrigger": "New trigger",
+    "quickMintKey": "Mint API key"
+  },
+  "overview": {
+    "quickStart": "Quick start",
+    "replaceKey": "Substitute a real API key from the Keys tab.",
+    "recentEvents": "Recent realtime events",
+    "manageKeys": "Manage all",
+    "noKeys": "No active keys yet."
+  },
+  "integrations": {
+    "title": "Integrations",
+    "subtitle": "Email and third-party adapters.",
+    "sendgridHelp": "API keys are encrypted at rest when TENANT_SECRET_ENCRYPTION_KEY is set on the API server.",
+    "configured": "Integration row saved for this project.",
+    "testSend": "Test send"
+  },
+  "settings": {
+    "auditRecent": "Recent audit",
+    "auditViewAll": "View all"
+  },
   "database": {
     "migrate": "Migrate",
     "query": "Query",
@@ -144,7 +173,8 @@
     "applied": "Migration applied.",
     "rowsAffected": "rows affected",
     "noRows": "No rows returned.",
-    "tablesEmpty": "No tables in the data allowlist yet."
+    "tablesEmpty": "No tables in the data allowlist yet.",
+    "migrationHistory": "Migration history"
   },
   "storage": {
     "title": "Object storage",
@@ -193,7 +223,8 @@
     "invoke": {
       "title": "Invoke",
       "bodyLabel": "Body (JSON)",
-      "go": "Invoke"
+      "go": "Invoke",
+      "async": "Async (queued)"
     },
     "entrypoint": {
       "title": "Public entrypoint",

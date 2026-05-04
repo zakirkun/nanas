@@ -3,14 +3,10 @@
 ALTER TABLE users ADD COLUMN IF NOT EXISTS platform_role TEXT NOT NULL DEFAULT 'user';
 CREATE INDEX IF NOT EXISTS idx_users_platform_role ON users(platform_role);
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role = 'super_admin') THEN
-    UPDATE users SET platform_role = 'super_admin'
-    WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1);
-  END IF;
-END
-$$;
+-- When no super_admin exists, promote the oldest user (idempotent, avoids PL/pgSQL in multistmt split).
+UPDATE users SET platform_role = 'super_admin'
+WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+  AND NOT EXISTS (SELECT 1 FROM users WHERE platform_role = 'super_admin');
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_projects_disabled ON projects(disabled);

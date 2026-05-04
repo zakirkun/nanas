@@ -3,53 +3,60 @@ package migrate
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
-	"path"
-	"sort"
-	"strings"
 
+	"github.com/golang-migrate/migrate/v4"
+	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
+// Platform Postgres migrations use [golang-migrate/migrate] with embedded *.up.sql /
+// *.down.sql files. Version state is stored in platform_schema_migrations (not legacy
+// schema_migrations with filename PK).
+//
+// [golang-migrate/migrate]: https://github.com/golang-migrate/migrate
+//
 //go:embed sql/*.sql
 var sqlFS embed.FS
 
+const platformMigrationsTable = "platform_schema_migrations"
+
+// Up applies embedded migrations forward using multistmt splitting in the pgx driver.
+// Migrate.Close closes both the golang-migrate source driver and *sql.DB from OpenDBFromPool.
 func Up(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		filename TEXT PRIMARY KEY,
-		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-	)`); err != nil {
-		return fmt.Errorf("schema_migrations: %w", err)
-	}
-	entries, err := sqlFS.ReadDir("sql")
+	_ = ctx
+
+	sqlDB := stdlib.OpenDBFromPool(pool)
+	driverInst, err := pgxmigrate.WithInstance(sqlDB, &pgxmigrate.Config{
+		MigrationsTable:       platformMigrationsTable,
+		MultiStatementEnabled: true,
+		MultiStatementMaxSize: 10 << 20,
+	})
 	if err != nil {
-		return err
+		_ = sqlDB.Close()
+		return fmt.Errorf("migrate database driver: %w", err)
 	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
-		}
+
+	sourceDrv, err := iofs.New(sqlFS, "sql")
+	if err != nil {
+		_ = driverInst.Close()
+		return fmt.Errorf("migrate source: %w", err)
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		var done bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename=$1)`, name).Scan(&done); err != nil {
-			return err
-		}
-		if done {
-			continue
-		}
-		b, err := sqlFS.ReadFile(path.Join("sql", name))
-		if err != nil {
-			return err
-		}
-		if _, err := pool.Exec(ctx, string(b)); err != nil {
-			return fmt.Errorf("migrate %s: %w", name, err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(filename) VALUES($1)`, name); err != nil {
-			return fmt.Errorf("record migration %s: %w", name, err)
-		}
+
+	migr, err := migrate.NewWithInstance("iofs", sourceDrv, "postgres", driverInst)
+	if err != nil {
+		_ = sourceDrv.Close()
+		_ = driverInst.Close()
+		return fmt.Errorf("migrate new: %w", err)
+	}
+
+	defer func() { _, _ = migr.Close() }()
+
+	if err := migr.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("migrate up: %w", err)
 	}
 	return nil
 }

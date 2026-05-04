@@ -21,6 +21,7 @@ import { StorageBrowserPage } from '@/features/storage/StorageBrowserPage';
 
 import { FunctionListPage } from '@/features/functions/FunctionListPage';
 import { FunctionDetailLayout } from '@/features/functions/FunctionDetailLayout';
+import { EditorTab } from '@/features/functions/EditorTab';
 import { VersionsTab } from '@/features/functions/VersionsTab';
 import { BuildsTab } from '@/features/functions/BuildsTab';
 import { DeploymentsTab } from '@/features/functions/DeploymentsTab';
@@ -34,12 +35,14 @@ import { CDCSubscriptionsPage } from '@/features/triggers/CDCSubscriptionsPage';
 import { ObservabilityLayout } from '@/features/observability/ObservabilityLayout';
 import { LogsViewerPage } from '@/features/observability/LogsViewerPage';
 import { MetricsPage } from '@/features/observability/MetricsPage';
+import { TracesPage } from '@/features/observability/TracesPage';
 import { AuditLogPage } from '@/features/observability/AuditLogPage';
 
 import { RealtimeStreamPage } from '@/features/realtime/RealtimeStreamPage';
 
 import { MarketplaceListPage } from '@/features/marketplace/MarketplaceListPage';
 import { MarketplaceDetailPage } from '@/features/marketplace/MarketplaceDetailPage';
+import { IntegrationsPage } from '@/features/integrations/IntegrationsPage';
 
 import { AdminUsersPage } from '@/features/admin/AdminUsersPage';
 import { AdminProjectsPage } from '@/features/admin/AdminProjectsPage';
@@ -94,12 +97,15 @@ const router = createBrowserRouter([
         ],
       },
       { path: 'projects/:pid/storage', element: <StorageBrowserPage /> },
+      { path: 'projects/:pid/integrations', element: <IntegrationsPage /> },
+      { path: 'projects/:pid/integrations', element: <IntegrationsPage /> },
       { path: 'projects/:pid/functions', element: <FunctionListPage /> },
       {
         path: 'projects/:pid/functions/:fid',
         element: <FunctionDetailLayout />,
         children: [
-          { index: true, element: <Navigate to="versions" replace /> },
+          { index: true, element: <Navigate to="editor" replace /> },
+          { path: 'editor', element: <EditorTab /> },
           { path: 'versions', element: <VersionsTab /> },
           { path: 'builds', element: <BuildsTab /> },
           { path: 'deployments', element: <DeploymentsTab /> },
@@ -117,6 +123,7 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="logs" replace /> },
           { path: 'logs', element: <LogsViewerPage /> },
+          { path: 'traces', element: <TracesPage /> },
           { path: 'metrics', element: <MetricsPage /> },
         ],
       },

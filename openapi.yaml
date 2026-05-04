@@ -21,6 +21,7 @@ tags:
   - name: Triggers
   - name: Realtime
   - name: Observability
+  - name: Integrations
   - name: Admin
   - name: Public Function
 
@@ -316,6 +317,17 @@ paths:
           description: DDL applied.
         '400': { $ref: '#/components/responses/ValidationError' }
 
+  /v1/projects/{pid}/migrations:
+    get:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+      summary: List recent DDL migrations applied from the control plane (Phase 17).
+      responses:
+        '200': { description: Migration history. }
+
   /v1/projects/{pid}/db/query:
     post:
       tags: [Database]
@@ -360,6 +372,30 @@ paths:
         '200':
           description: Presigned URL.
 
+  /v1/projects/{pid}/storage/objects:
+    get:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: bucket, schema: { type: string } }
+        - { in: query, name: prefix, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, default: 200 } }
+      summary: List objects in the project bucket (Phase 12).
+      responses:
+        '200': { description: Object list. }
+
+  /v1/projects/{pid}/storage/objects/{key}:
+    delete:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: key, required: true, schema: { type: string } }
+      summary: Delete an object from the project bucket (Phase 12).
+      responses:
+        '200': { description: Deleted. }
+
   /v1/projects/{pid}/storage/download:
     post:
       tags: [Storage]
@@ -390,6 +426,120 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Function' }
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      summary: List functions in a project with denormalised summary fields.
+      responses:
+        '200':
+          description: Function list.
+
+  /v1/projects/{pid}/functions/{fid}:
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Read function detail (name, slug, current_version, entrypoint summary).
+      responses:
+        '200': { description: Function detail. }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{pid}/functions/{fid}/deployments:
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+      summary: List deployments for a function (newest first).
+      responses:
+        '200': { description: Deployment list. }
+
+  /v1/deployments/{did}:
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: did, required: true, schema: { type: string, format: uuid } }
+      summary: Poll a deployment by id (PRD section 7).
+      responses:
+        '200': { description: Deployment status. }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/projects/{pid}/functions/{fid}/draft:
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Read the in-browser code-editor draft for a function (Phase 4).
+      responses:
+        '200': { description: Draft. }
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Save the in-browser draft (files + env + runtime).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: object
+                    required: [path, content]
+                    properties:
+                      path: { type: string }
+                      content: { type: string }
+                env:
+                  type: object
+                  additionalProperties: { type: string }
+                runtime: { type: string, enum: [node, go, python, wasm] }
+      responses:
+        '200': { description: Saved. }
+
+  /v1/projects/{pid}/functions/{fid}/source:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Package authored files into a tar.gz and upload it to the project bucket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, files]
+              properties:
+                version: { type: string }
+                files:
+                  type: array
+                  items:
+                    type: object
+                    required: [path, content]
+                    properties:
+                      path: { type: string }
+                      content: { type: string }
+      responses:
+        '200': { description: Tarball uploaded; returns artifact_key + checksum. }
 
   /v1/projects/{pid}/functions/{fid}/artifacts/presign:
     post:
@@ -473,6 +623,25 @@ paths:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
         - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
       summary: Invoke the latest active deployment for a function (project-scoped).
+
+  /v1/projects/{pid}/functions/{fid}/invoke/async:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Enqueue async invocation (JetStream when NATS configured; otherwise in-process).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input: { type: object, additionalProperties: true }
+      responses:
+        '202':
+          description: Queued with enqueue_id.
 
   /v1/projects/{pid}/functions/{fid}/entrypoint:
     post:
@@ -569,6 +738,55 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Trigger' }
+    get:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List triggers in a project with dispatch counters.
+      responses:
+        '200': { description: Trigger list. }
+
+  /v1/projects/{pid}/triggers/{tid}:
+    get:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: tid, required: true, schema: { type: string, format: uuid } }
+      summary: Read a single trigger.
+      responses:
+        '200': { description: Trigger detail. }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: tid, required: true, schema: { type: string, format: uuid } }
+      summary: Toggle a trigger's enabled state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200': { description: Updated. }
+
+  /v1/projects/{pid}/triggers/{tid}/status:
+    get:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: tid, required: true, schema: { type: string, format: uuid } }
+      summary: Read recent execution counters and DLQ totals for a trigger.
+      responses:
+        '200': { description: Trigger status. }
 
   /v1/projects/{pid}/triggers/dlq:
     get:
@@ -598,12 +816,150 @@ paths:
         - { in: query, name: limit, schema: { type: integer, default: 100 } }
       summary: List function logs filtered by deployment and time range.
 
+  /v1/projects/{pid}/observability/traces:
+    get:
+      tags: [Observability]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+      summary: Recent traces collected for the project (Phase 10 trace store).
+      responses:
+        '200': { description: Traces list. }
+
+  /v1/observability/traces:
+    get:
+      tags: [Observability]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: query, name: trace_id, required: true, schema: { type: string } }
+      summary: Read all spans for a trace_id (PRD section 16).
+      responses:
+        '200': { description: Trace + spans. }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/projects/{pid}/triggers/{tid}/dryrun:
+    post:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: tid, required: true, schema: { type: string, format: uuid } }
+      summary: Evaluate a trigger's payload-transform DSL against a sample event (Phase 6).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event_payload:
+                  type: object
+                  additionalProperties: true
+                transform:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200': { description: Evaluation result. }
+
+  /v1/projects/{pid}/permissions:
+    get:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Read the project's RBAC matrix (Phase 13).
+      responses:
+        '200': { description: Permissions list. }
+
+  /v1/projects/{pid}/settings/retention:
+    get:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Read log + trace retention days.
+      responses:
+        '200': { description: Retention settings. }
+    patch:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Update retention days for logs and/or traces.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                logs_days: { type: integer, nullable: true, minimum: 1, maximum: 365 }
+                traces_days: { type: integer, nullable: true, minimum: 1, maximum: 90 }
+      responses:
+        '200': { description: Updated. }
+
+  /v1/projects/{pid}/integrations:
+    get:
+      tags: [Integrations]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List configured integration adapters for the project.
+      responses:
+        '200': { description: Adapter list (secrets redacted). }
+
+  /v1/projects/{pid}/integrations/email:
+    post:
+      tags: [Integrations]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Store SendGrid API key (encrypted) and optional default_from / default_reply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                api_key: { type: string }
+                default_from: { type: string }
+                default_reply: { type: string }
+      responses:
+        '200': { description: Saved. }
+
+  /v1/projects/{pid}/integrations/email/send:
+    post:
+      tags: [Integrations]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Send email via SendGrid using the project integration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, subject, html]
+              properties:
+                to: { type: string }
+                from: { type: string, description: Optional if default_from configured. }
+                subject: { type: string }
+                html: { type: string }
+      responses:
+        '200': { description: Sent. }
+        '502': { description: Upstream error. }
+
   /v1/projects/{pid}/audit:
     get:
       tags: [Observability]
       security: [{ BearerJWT: [] }]
       parameters:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 100 } }
       summary: List audit events for the project (admin role required).
 
   /v1/projects/{pid}/data/tables/{table}/rows:

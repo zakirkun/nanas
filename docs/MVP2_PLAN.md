@@ -2,6 +2,10 @@
 
 This document captures the next iteration of Nanas. MVP 1 delivers a working backend, basic dataplane sandbox, and structured Problem responses. MVP 2 turns Nanas into a more credible self-hostable function platform.
 
+## PRD-aligned control-plane status
+
+The following PRD-shaped capabilities are now reflected in the main branch: function/trigger/deployment listing APIs, in-browser drafts and expanded deploy metadata, payload-transform DSL with trigger dry-run, SQL-style realtime subscriptions over CDC-shaped events, trace collection endpoints, storage object listing/deletion, RBAC permissions + retention settings, async function invoke (JetStream when configured), SendGrid integration (encrypted secrets), migration history, global search (cmdk), mobile bottom navigation, and overview quick-start snippets. Remaining MVP 2 roadmap items below (Kaniko/sandboxed runtimes, multi-region tables, KMS, etc.) are still open.
+
 Each section lists target files (when known), required schema changes, and acceptance criteria so the work can be picked up section by section.
 
 ## 1. Real Function Build Pipeline

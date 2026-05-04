@@ -10,7 +10,7 @@ COPY web/ ./
 # In this stage <repo-root> is `/`, where we copied the spec above.
 RUN pnpm gen:api && pnpm build
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.24-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git
 COPY go.mod go.sum ./

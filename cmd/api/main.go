@@ -1,10 +1,15 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,9 +25,11 @@ import (
 	"nanas/internal/config"
 	"nanas/internal/datalane"
 	"nanas/internal/dsl"
+	payloaddsl "nanas/internal/dsl/payload"
 	"nanas/internal/graphqlapi"
 	"nanas/internal/httpx"
 	"nanas/internal/i18n"
+	"nanas/internal/integrations/email"
 	"nanas/internal/metrics"
 	"nanas/internal/middleware"
 	"nanas/internal/migrate"
@@ -87,6 +94,9 @@ func main() {
 			}
 			natsbus.LogDispatch(b)
 		},
+		OnAsyncInvoke: func(b []byte) {
+			asyncInvokeFromNATS(st, cfg, dp, hub, b)
+		},
 		OnDLQ: func(ic context.Context, pid uuid.UUID, raw []byte, reason string) {
 			_ = st.AppendTriggerDLQ(ic, pid, reason, json.RawMessage(raw))
 		},
@@ -107,7 +117,7 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(middleware.RequestID(), middleware.I18n(bun), middleware.RecoverJSON(bun), middleware.AccessLog(), metrics.PrometheusHTTP(), middleware.RateLimitApprox(cfg.RateLimitPerMinute))
+	r.Use(middleware.RequestID(), middleware.I18n(bun), middleware.RecoverJSON(bun), middleware.AccessLog(), metrics.PrometheusHTTP(), middleware.RateLimitApprox(cfg.RateLimitPerMinute), telemetry.CaptureHTTP(telemetry.Default))
 	if cfg.OtelEndpoint != "" {
 		r.Use(otelgin.Middleware("nanas-control-plane"))
 	}
@@ -469,6 +479,353 @@ func main() {
 		c.JSON(201, gin.H{"fn_id": f.ID, "name": f.Name})
 	})
 
+	// Phase 1 lists: power the Function Explorer (PRD section 4) and Trigger
+	// Manager (PRD section 7). Read paths require viewer role.
+	v1.GET("/projects/:pid/functions", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+		rows, err := st.ListFunctionsByProject(c.Request.Context(), pid, int32(limit), int32(offset))
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		out := rows
+		if out == nil {
+			out = []store.FunctionListRow{}
+		}
+		c.JSON(200, gin.H{"functions": out, "limit": limit, "offset": offset})
+	})
+
+	v1.GET("/projects/:pid/functions/:fid", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		f, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		ep, _ := st.FunctionEntrypoint(c.Request.Context(), fid)
+		c.JSON(200, gin.H{
+			"fn_id":           f.ID,
+			"name":            f.Name,
+			"slug":            f.Slug,
+			"current_version": f.CurrentVersion,
+			"created_at":      f.CreatedAt,
+			"entrypoint":      gin.H{"enabled": ep.Enabled, "auth_mode": ep.AuthMode},
+		})
+	})
+
+	v1.GET("/projects/:pid/functions/:fid/versions", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if _, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid); err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		rows, err := st.ListVersionsByFunction(c.Request.Context(), fid, int32(limit))
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		out := rows
+		if out == nil {
+			out = []store.FunctionVersionListRow{}
+		}
+		c.JSON(200, gin.H{"versions": out})
+	})
+
+	v1.GET("/projects/:pid/functions/:fid/deployments", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if _, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid); err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		rows, err := st.ListDeploymentsForFunctionVerbose(c.Request.Context(), fid, int32(limit))
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		out := rows
+		if out == nil {
+			out = []store.DeploymentListRow{}
+		}
+		c.JSON(200, gin.H{"deployments": out})
+	})
+
+	// /v1/deployments/:did is project-agnostic so we register it on the auth'd
+	// v1 group without RequirePermission — instead we cross-check the project
+	// the user has access to via SubjectProjectRole.
+	v1.GET("/deployments/:did", func(c *gin.Context) {
+		did, err := uuid.Parse(c.Param("did"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		row, pid, err := st.DeploymentByID(c.Request.Context(), did)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "DEPLOYMENT_NOT_FOUND", nil)
+			return
+		}
+		if !canReadProject(c, st, pid) {
+			httpx.Problem(c, bun, http.StatusForbidden, "FORBIDDEN", nil)
+			return
+		}
+		c.JSON(200, gin.H{"deployment": row})
+	})
+
+	v1.GET("/projects/:pid/triggers", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		rows, err := st.ListTriggersWithStats(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		out := rows
+		if out == nil {
+			out = []store.TriggerListRow{}
+		}
+		c.JSON(200, gin.H{"triggers": out})
+	})
+
+	v1.GET("/projects/:pid/triggers/:tid", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		tid, err := uuid.Parse(c.Param("tid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "TRIGGER_ID_INVALID", nil)
+			return
+		}
+		row, err := st.TriggerByIDInProject(c.Request.Context(), pid, tid)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "TRIGGER_NOT_FOUND", nil)
+			return
+		}
+		c.JSON(200, gin.H{"trigger": row})
+	})
+
+	v1.PATCH("/projects/:pid/triggers/:tid", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		tid, err := uuid.Parse(c.Param("tid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "TRIGGER_ID_INVALID", nil)
+			return
+		}
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := c.BindJSON(&body); err != nil || body.Enabled == nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if err := st.SetTriggerEnabled(c.Request.Context(), pid, tid, *body.Enabled); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"id": tid, "enabled": *body.Enabled})
+	})
+
+	// Phase 6 — DSL dry-run (PRD section 7).
+	// Lets the trigger composer preview the result of `payload_transform` (map +
+	// filter + reduce) on a sample event without creating any data.
+	v1.POST("/projects/:pid/triggers/:tid/dryrun", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		tid, err := uuid.Parse(c.Param("tid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "TRIGGER_ID_INVALID", nil)
+			return
+		}
+		row, err := st.TriggerByIDInProject(c.Request.Context(), pid, tid)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "TRIGGER_NOT_FOUND", nil)
+			return
+		}
+		var body struct {
+			EventPayload map[string]any  `json:"event_payload"`
+			Override     json.RawMessage `json:"transform"`
+		}
+		_ = c.BindJSON(&body)
+		raw := body.Override
+		if len(raw) == 0 {
+			// Use the trigger's stored config.payload_transform when no override.
+			cfg := map[string]any{}
+			_ = json.Unmarshal(row.Config, &cfg)
+			if pt, ok := cfg["payload_transform"]; ok {
+				raw, _ = json.Marshal(pt)
+			}
+		}
+		spec, err := payloaddsl.FromJSON(raw)
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "transform", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		res, err := payloaddsl.Apply(body.EventPayload, spec)
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "transform", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		c.JSON(200, gin.H{
+			"output":  res.Output,
+			"passed":  res.Passed,
+			"reduced": res.Reduced,
+		})
+	})
+
+	v1.GET("/projects/:pid/triggers/:tid/status", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		tid, err := uuid.Parse(c.Param("tid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "TRIGGER_ID_INVALID", nil)
+			return
+		}
+		row, err := st.TriggerByIDInProject(c.Request.Context(), pid, tid)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "TRIGGER_NOT_FOUND", nil)
+			return
+		}
+		c.JSON(200, gin.H{
+			"trigger_id":           row.ID,
+			"enabled":              row.Enabled,
+			"dispatch_count":       row.DispatchCount,
+			"dlq_count":            row.DLQCount,
+			"last_fired_at":        row.LastFiredAt,
+			"last_dispatch_status": row.LastDispatchStatus,
+		})
+	})
+
+	// Phase 4 — In-browser code authoring (PRD wireframe #1).
+	// Drafts are persisted server-side per function so editors are never lost,
+	// and the source endpoint packages an authored set of files into a tar.gz
+	// that lives in MinIO under the same artifacts/ path the build pipeline reads.
+	v1.GET("/projects/:pid/functions/:fid/draft", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if _, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid); err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		d, err := st.GetFunctionDraft(c.Request.Context(), fid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{
+			"fn_id":      d.FnID,
+			"files":      d.Files,
+			"env":        d.Env,
+			"runtime":    d.Runtime,
+			"updated_at": d.UpdatedAt,
+		})
+	})
+
+	v1.POST("/projects/:pid/functions/:fid/draft", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if _, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid); err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		var body struct {
+			Files   []sourceFile      `json:"files"`
+			Env     map[string]string `json:"env"`
+			Runtime string            `json:"runtime"`
+		}
+		if err := c.BindJSON(&body); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if err := validateSourceFiles(body.Files); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "files", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		filesJSON, _ := json.Marshal(body.Files)
+		envJSON, _ := json.Marshal(body.Env)
+		var by *uuid.UUID
+		if v, ok := c.Get(middleware.KeyUserUUID); ok {
+			u := v.(uuid.UUID)
+			by = &u
+		}
+		if _, err := st.SaveFunctionDraft(c.Request.Context(), fid, filesJSON, envJSON, body.Runtime, by); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"saved": true, "files": len(body.Files)})
+	})
+
+	v1.POST("/projects/:pid/functions/:fid/source", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		fn, err := st.FunctionByIDInProject(c.Request.Context(), pid, fid)
+		if err != nil {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		pv, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || pv.MinioBucket == nil || strings.TrimSpace(pv.ProvisionStatus) != "ready" {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		var body struct {
+			Version string       `json:"version"`
+			Files   []sourceFile `json:"files"`
+		}
+		if err := c.BindJSON(&body); err != nil || strings.TrimSpace(body.Version) == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if err := validateSourceFiles(body.Files); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "files", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		tarball, sum, err := buildSourceTarball(body.Files)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		key := "artifacts/" + pid.String() + "/" + fid.String() + "/" + strings.TrimSpace(body.Version) + ".tar.gz"
+		if err := miniox.ValidateObjectKey(key); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "files", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
+			return
+		}
+		if err := miniox.PutBytes(c.Request.Context(), cfg, *pv.MinioBucket, key, tarball, "application/gzip"); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		_ = st.UpsertObject(c.Request.Context(), pid, *pv.MinioBucket, key, int64(len(tarball)), "")
+		c.JSON(200, gin.H{
+			"function_id":  fn.ID,
+			"artifact_key": key,
+			"checksum":     "sha256:" + sum,
+			"size":         len(tarball),
+		})
+	})
+
 	v1.POST("/projects/:pid/functions/:fid/artifacts/presign", middleware.RequirePermission("developer"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
 		fid, _ := uuid.Parse(c.Param("fid"))
@@ -604,9 +961,17 @@ func main() {
 			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
 			return
 		}
+		// Phase 5 (PRD section 6) — accept the full deploy spec. Older callers
+		// that only sent {version, region} continue to work; the new fields are
+		// all optional with sensible defaults.
 		var body struct {
-			Version string `json:"version"`
-			Region  string `json:"region"`
+			Version         string            `json:"version"`
+			Region          string            `json:"region"`
+			Strategy        string            `json:"strategy"`
+			Resources       map[string]any    `json:"resources"`
+			Env             map[string]string `json:"env"`
+			HealthCheckPath string            `json:"health_check_path"`
+			TimeoutMS       int               `json:"timeout_ms"`
 		}
 		_ = c.BindJSON(&body)
 		if body.Version == "" && fn.CurrentVersion != nil {
@@ -615,6 +980,19 @@ func main() {
 		if body.Version == "" {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
 			return
+		}
+		switch strings.ToLower(strings.TrimSpace(body.Strategy)) {
+		case "", "rolling", "canary", "recreate":
+			body.Strategy = strings.ToLower(strings.TrimSpace(body.Strategy))
+			if body.Strategy == "" {
+				body.Strategy = "rolling"
+			}
+		default:
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "strategy", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		if body.TimeoutMS <= 0 {
+			body.TimeoutMS = 5000
 		}
 		var vid uuid.UUID
 		var bstat string
@@ -635,6 +1013,17 @@ func main() {
 			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
 			return
 		}
+		// Persist deploy spec onto the row + flip status -> deploying so the
+		// UI sees the transition while the dataplane call runs.
+		resourcesJSON, _ := json.Marshal(body.Resources)
+		envJSON, _ := json.Marshal(body.Env)
+		var hp *string
+		if body.HealthCheckPath != "" {
+			s := body.HealthCheckPath
+			hp = &s
+		}
+		_ = st.MarkDeploymentDeploying(c.Request.Context(), d.ID, body.Strategy, resourcesJSON, envJSON, hp, body.TimeoutMS)
+
 		pp, err := st.ProjectByID(c.Request.Context(), pid)
 		if err != nil || pp.MinioBucket == nil {
 			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
@@ -657,6 +1046,12 @@ func main() {
 			"TENANT_MINIO_BUCKET": *pp.MinioBucket,
 			"MINIO_USE_SSL":       strconv.FormatBool(cfg.MinioUseSSL),
 		}
+		// User-provided env vars take precedence over baseline tenant env.
+		for k, v := range body.Env {
+			if k != "" {
+				dpEnv[k] = v
+			}
+		}
 		artKey := strings.TrimPrefix(strings.TrimPrefix(sv.SourceURI, "minio://"), "/")
 		if err := dp.Deploy(c.Request.Context(), datalane.DeployPayload{
 			DeploymentID: d.ID.String(),
@@ -666,12 +1061,15 @@ func main() {
 			Checksum:     sv.Checksum,
 		}); err != nil {
 			_ = st.MarkDeploymentFailed(c.Request.Context(), d.ID, err.Error())
+			_ = st.UpdateFunctionLastDeployment(c.Request.Context(), fid, "failed", time.Now())
 			_ = st.AppendFunctionLog(c.Request.Context(), &pid, &d.ID, "error", "dataplane deploy failed")
 			httpx.Problem(c, bun, 502, "GATEWAY_ERROR", nil)
 			return
 		}
+		_ = st.MarkDeploymentActive(c.Request.Context(), d.ID)
+		_ = st.UpdateFunctionLastDeployment(c.Request.Context(), fid, "active", time.Now())
 		_ = st.AppendFunctionLog(c.Request.Context(), &pid, &d.ID, "info", "deployment active (+ dataplane)")
-		c.JSON(200, gin.H{"deployment_id": d.ID, "status": d.Status})
+		c.JSON(200, gin.H{"deployment_id": d.ID, "status": "active"})
 	})
 
 	v1.POST("/projects/:pid/functions/:fid/deployments/rollback", middleware.RequirePermission("developer"), func(c *gin.Context) {
@@ -703,27 +1101,7 @@ func main() {
 			Input map[string]any `json:"input"`
 		}
 		_ = c.BindJSON(&body)
-		ip := datalane.InvokePayload{Input: body.Input}
-		if drow, er := st.LatestActiveDeploymentForFunction(c.Request.Context(), fid); er == nil {
-			ip.DeploymentID = drow.ID.String()
-			pp, er2 := st.ProjectByID(c.Request.Context(), pid)
-			dbURL, er3 := tenantdb.ConnectionURL(c.Request.Context(), cfg, st, pid)
-			if er2 == nil && pp.MinioBucket != nil && er3 == nil {
-				_, _, sv, er4 := st.DeploymentArtifacts(c.Request.Context(), drow.ID)
-				if er4 == nil {
-					ip.TenantEnv = map[string]string{
-						"TENANT_DATABASE_URL": dbURL,
-						"MINIO_ENDPOINT":      cfg.MinioEndpoint,
-						"MINIO_BUCKET":        *pp.MinioBucket,
-						"TENANT_MINIO_BUCKET": *pp.MinioBucket,
-						"MINIO_USE_SSL":       strconv.FormatBool(cfg.MinioUseSSL),
-					}
-					ip.Runtime = sv.Runtime
-					ip.Checksum = sv.Checksum
-					ip.ArtifactKey = strings.TrimPrefix(strings.TrimPrefix(sv.SourceURI, "minio://"), "/")
-				}
-			}
-		}
+		ip := buildInvokePayload(c.Request.Context(), st, cfg, pid, fid, body.Input)
 		invStart := time.Now()
 		out, err := dp.Invoke(c.Request.Context(), ip)
 		result := "ok"
@@ -735,6 +1113,44 @@ func main() {
 		}
 		metrics.RecordInvocation(pid.String(), fn.Name, result, time.Since(invStart))
 		c.JSON(200, gin.H{"status": out.Status, "output": out.Output})
+	})
+
+	v1.POST("/projects/:pid/functions/:fid/invoke/async", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, _ := uuid.Parse(c.Param("fid"))
+		fn, err := st.FunctionByID(c.Request.Context(), fid)
+		if err != nil || fn.ProjectID != pid {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		var body struct {
+			Input map[string]any `json:"input"`
+		}
+		_ = c.BindJSON(&body)
+		enqueueID := uuid.New()
+		env := map[string]any{
+			"enqueue_id":   enqueueID.String(),
+			"project_id":   pid.String(),
+			"function_id":  fid.String(),
+			"function":     fn.Name,
+			"input":        body.Input,
+			"enqueued_at":  time.Now().UTC().Format(time.RFC3339Nano),
+			"dispatch_via": "http",
+		}
+		if err := st.AppendPlatformEvent(c.Request.Context(), &pid, "function.invoke.async", env); err != nil {
+			slog.Warn("async_invoke_event", "err", err)
+		}
+		if nbus != nil {
+			_ = nbus.PublishAsyncFunctionInvoke(c.Request.Context(), map[string]any{
+				"enqueue_id":  enqueueID.String(),
+				"project_id":  pid.String(),
+				"function_id": fid.String(),
+				"input":       body.Input,
+			})
+		} else {
+			go runAsyncInvokeJob(context.Background(), st, cfg, dp, hub, pid, fid, enqueueID.String(), body.Input, fn.Name)
+		}
+		c.JSON(202, gin.H{"enqueue_id": enqueueID.String(), "status": "queued"})
 	})
 
 	v1.POST("/projects/:pid/db/migrate", middleware.RequirePermission("developer"), func(c *gin.Context) {
@@ -750,11 +1166,26 @@ func main() {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "sql", Message: bun.AsLocaleMsg("SQL_EXECUTION_FAILED")}})
 			return
 		}
+		act := routeActorUUID(c)
 		if err := tenantdb.MigrateStatements(c.Request.Context(), cfg, st, pid, body.SQL); err != nil {
+			msg := err.Error()
+			_ = st.InsertDbMigration(c.Request.Context(), pid, body.SQL, act, "failed", &msg)
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "sql", Message: bun.AsLocaleMsg("SQL_EXECUTION_FAILED")}})
 			return
 		}
+		_ = st.InsertDbMigration(c.Request.Context(), pid, body.SQL, act, "applied", nil)
 		c.JSON(200, gin.H{"applied": true})
+	})
+
+	v1.GET("/projects/:pid/migrations", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		rows, err := st.ListDbMigrations(c.Request.Context(), pid, int32(limit))
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"migrations": rows})
 	})
 
 	v1.POST("/projects/:pid/db/query", middleware.RequirePermission("developer"), func(c *gin.Context) {
@@ -862,6 +1293,56 @@ func main() {
 		c.JSON(200, gin.H{"download_url": url, "method": "GET", "bucket": *p.MinioBucket})
 	})
 
+	// Phase 12 — bucket browser endpoints (PRD section 10).
+	v1.GET("/projects/:pid/storage/objects", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		p, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || p.MinioBucket == nil {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		bucket := strings.TrimSpace(c.DefaultQuery("bucket", *p.MinioBucket))
+		if bucket != *p.MinioBucket {
+			// We only expose the project's own bucket; other buckets in the
+			// MinIO instance are off-limits.
+			httpx.Problem(c, bun, http.StatusForbidden, "FORBIDDEN", nil)
+			return
+		}
+		prefix := strings.TrimSpace(c.Query("prefix"))
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+		objects, err := miniox.List(c.Request.Context(), cfg, bucket, prefix, limit)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"bucket": bucket, "objects": objects})
+	})
+
+	v1.DELETE("/projects/:pid/storage/objects/*key", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		p, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || p.MinioBucket == nil {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		key := strings.TrimPrefix(c.Param("key"), "/")
+		if err := miniox.ValidateObjectKey(key); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
+			return
+		}
+		if err := miniox.Remove(c.Request.Context(), cfg, *p.MinioBucket, key); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		var actor *uuid.UUID
+		if v, ok := c.Get(middleware.KeyUserUUID); ok {
+			u := v.(uuid.UUID)
+			actor = &u
+		}
+		_ = st.Audit(c.Request.Context(), &pid, actor, "object.delete", key, nil)
+		c.JSON(200, gin.H{"deleted": true, "key": key})
+	})
+
 	v1.POST("/projects/:pid/triggers", middleware.RequirePermission("developer"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
 		var body struct {
@@ -897,12 +1378,17 @@ func main() {
 			httpx.Problem(c, bun, 400, "TRIGGER_ID_INVALID", nil)
 			return
 		}
-		payload := map[string]any{"trigger_id": tid.String(), "project_id": pid.String(), "manual": true}
-		if nbus != nil {
-			_ = nbus.PublishTriggerDispatch(c.Request.Context(), payload)
+		event := map[string]any{"trigger_id": tid.String(), "project_id": pid.String(), "manual": true}
+		// Phase 6 — apply payload_transform if configured. The dispatched event
+		// receives the projected/filtered output; if the filter rejects the
+		// event we still record dispatch_count + last_dispatch_status="filtered"
+		// so the UI can surface that.
+		dispatched := dispatchTriggerWithDSL(c.Request.Context(), st, hub, nbus, tid, pid, event)
+		if dispatched {
+			c.JSON(202, gin.H{"queued": true})
+			return
 		}
-		hub.Broadcast(pid, "triggers", payload)
-		c.JSON(202, gin.H{"queued": true})
+		c.JSON(202, gin.H{"queued": false, "filtered": true})
 	})
 
 	v1.GET("/projects/:pid/triggers/dlq", middleware.RequirePermission("viewer"), func(c *gin.Context) {
@@ -913,6 +1399,136 @@ func main() {
 			return
 		}
 		c.JSON(200, gin.H{"events": rows})
+	})
+
+	// Phase 16 — Project-scoped integrations (email via SendGrid).
+	v1.GET("/projects/:pid/integrations", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		rows, err := st.ListProjectIntegrations(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"integrations": rows})
+	})
+	v1.POST("/projects/:pid/integrations/email", middleware.RequirePermission("admin"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		var body struct {
+			APIKey       string `json:"api_key"`
+			DefaultFrom  string `json:"default_from"`
+			DefaultReply string `json:"default_reply"`
+		}
+		if err := c.BindJSON(&body); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		cfgBlob := map[string]any{}
+		if strings.TrimSpace(body.DefaultFrom) != "" {
+			cfgBlob["default_from"] = strings.TrimSpace(body.DefaultFrom)
+		}
+		if strings.TrimSpace(body.DefaultReply) != "" {
+			cfgBlob["default_reply"] = strings.TrimSpace(body.DefaultReply)
+		}
+		raw, _ := json.Marshal(cfgBlob)
+		if err := st.UpsertEmailIntegration(c.Request.Context(), pid, "sendgrid", body.APIKey, cfg.TenantSecretKey, raw); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		_ = st.Audit(c.Request.Context(), &pid, routeActorUUID(c), "integration.email.upsert", "sendgrid", nil)
+		c.JSON(200, gin.H{"adapter": "sendgrid", "status": "saved"})
+	})
+	v1.POST("/projects/:pid/integrations/email/send", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		var body struct {
+			To      string `json:"to"`
+			From    string `json:"from"`
+			Subject string `json:"subject"`
+			HTML    string `json:"html"`
+		}
+		if err := c.BindJSON(&body); err != nil || strings.TrimSpace(body.To) == "" || strings.TrimSpace(body.Subject) == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		key, err := st.SendGridAPIKey(c.Request.Context(), pid, cfg.TenantSecretKey)
+		if err != nil || key == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		rows, _ := st.ListProjectIntegrations(c.Request.Context(), pid)
+		from := strings.TrimSpace(body.From)
+		if from == "" {
+			for _, r := range rows {
+				if r.Adapter == "sendgrid" {
+					var meta map[string]any
+					_ = json.Unmarshal(r.Config, &meta)
+					if v, ok := meta["default_from"].(string); ok {
+						from = strings.TrimSpace(v)
+					}
+					break
+				}
+			}
+		}
+		if from == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if err := email.SendGrid(key, from, body.To, body.Subject, body.HTML); err != nil {
+			slog.Warn("sendgrid", "err", err)
+			httpx.Problem(c, bun, 502, "GATEWAY_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"sent": true})
+	})
+
+	// Phase 13 — Roles matrix + retention settings (PRD section 12).
+	v1.GET("/projects/:pid/permissions", middleware.RequirePermission("admin"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		rows, err := st.ListProjectPermissions(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		owner, _ := st.ProjectOwnerID(c.Request.Context(), pid)
+		out := rows
+		if out == nil {
+			out = []store.PermissionRow{}
+		}
+		c.JSON(200, gin.H{"permissions": out, "owner_id": owner})
+	})
+
+	v1.GET("/projects/:pid/settings/retention", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		log, trace, err := st.RetentionSettings(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"logs_days": log, "traces_days": trace})
+	})
+
+	v1.PATCH("/projects/:pid/settings/retention", middleware.RequirePermission("admin"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		var body struct {
+			LogsDays   *int `json:"logs_days"`
+			TracesDays *int `json:"traces_days"`
+		}
+		if err := c.BindJSON(&body); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		if body.LogsDays != nil && (*body.LogsDays < 1 || *body.LogsDays > 365) {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "logs_days", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		if body.TracesDays != nil && (*body.TracesDays < 1 || *body.TracesDays > 90) {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "traces_days", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		if err := st.PatchRetentionSettings(c.Request.Context(), pid, body.LogsDays, body.TracesDays); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"logs_days": body.LogsDays, "traces_days": body.TracesDays})
 	})
 
 	v1.PATCH("/projects/:pid/settings/data-allowlist", middleware.RequirePermission("admin"), func(c *gin.Context) {
@@ -1037,12 +1653,55 @@ func main() {
 
 	v1.GET("/projects/:pid/audit", middleware.RequirePermission("admin"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
-		rows, err := st.AuditList(c.Request.Context(), pid, 100)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		if limit <= 0 || limit > 500 {
+			limit = 100
+		}
+		rows, err := st.AuditList(c.Request.Context(), pid, int32(limit))
 		if err != nil {
 			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
 			return
 		}
 		c.JSON(200, gin.H{"events": rows})
+	})
+
+	// Phase 10 — Trace store endpoints (PRD section 16). The list route is
+	// per-project (viewer); the by-id route is project-agnostic but cross-checks
+	// the trace's project against the caller before returning spans.
+	v1.GET("/projects/:pid/observability/traces", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		traces := telemetry.Default.List(&pid, limit)
+		c.JSON(200, gin.H{"traces": traces})
+	})
+
+	v1.GET("/observability/traces", func(c *gin.Context) {
+		traceID := strings.TrimSpace(c.Query("trace_id"))
+		if traceID == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		spans := telemetry.Default.Get(traceID)
+		if len(spans) == 0 {
+			httpx.Problem(c, bun, 404, "NOT_FOUND", nil)
+			return
+		}
+		// Authorisation: when any captured span carries a project, only allow
+		// users with access to that project. Spans without a project_id are
+		// visible to any signed-in user (e.g. /v1/projects list).
+		var projectGate *uuid.UUID
+		for _, s := range spans {
+			if s.ProjectID != nil {
+				p := *s.ProjectID
+				projectGate = &p
+				break
+			}
+		}
+		if projectGate != nil && !canReadProject(c, st, *projectGate) {
+			httpx.Problem(c, bun, http.StatusForbidden, "FORBIDDEN", nil)
+			return
+		}
+		c.JSON(200, gin.H{"trace": gin.H{"trace_id": traceID, "spans": spans}})
 	})
 
 	v1.GET("/projects/:pid/graphql/schema", middleware.RequirePermission("viewer"), func(c *gin.Context) {
@@ -1527,6 +2186,144 @@ func main() {
 	}
 }
 
+// dispatchTriggerWithDSL applies the optional payload_transform DSL stored on a
+// trigger to `event`, then publishes the result to NATS + the realtime hub.
+// Returns true when the event was dispatched, false when the filter rejected
+// it. Either way it stamps the trigger's dispatch counters.
+func dispatchTriggerWithDSL(
+	ctx context.Context,
+	st *store.Store,
+	hub *realtime.Hub,
+	nbus *natsbus.Bus,
+	tid uuid.UUID,
+	pid uuid.UUID,
+	event map[string]any,
+) bool {
+	now := time.Now()
+	row, err := st.TriggerByIDInProject(ctx, pid, tid)
+	if err != nil {
+		_ = st.RecordTriggerDispatch(ctx, tid, "missing", now)
+		return false
+	}
+	cfg := map[string]any{}
+	_ = json.Unmarshal(row.Config, &cfg)
+	transformRaw, _ := json.Marshal(cfg["payload_transform"])
+	dsl, _ := payloaddsl.FromJSON(transformRaw)
+	res, err := payloaddsl.Apply(event, dsl)
+	if err != nil {
+		_ = st.RecordTriggerDispatch(ctx, tid, "error", now)
+		return false
+	}
+	if !res.Passed {
+		_ = st.RecordTriggerDispatch(ctx, tid, "filtered", now)
+		return false
+	}
+	out := res.Output
+	if out == nil {
+		out = event
+	} else {
+		// Preserve trigger_id & project_id so downstream consumers can route.
+		out["trigger_id"] = tid.String()
+		out["project_id"] = pid.String()
+	}
+	if nbus != nil {
+		_ = nbus.PublishTriggerDispatch(ctx, out)
+	}
+	hub.Broadcast(pid, "triggers", out)
+	_ = st.RecordTriggerDispatch(ctx, tid, "ok", now)
+	return true
+}
+
+// sourceFile is the unit of in-browser code authoring (Phase 4). The path is
+// relative to the artifact root (no leading slash, no `..`); the content is the
+// raw text that will be written into the tar.gz uploaded to MinIO.
+type sourceFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func validateSourceFiles(files []sourceFile) error {
+	if len(files) == 0 {
+		return errors.New("no files supplied")
+	}
+	for _, f := range files {
+		path := strings.TrimSpace(f.Path)
+		if path == "" {
+			return errors.New("empty file path")
+		}
+		if strings.HasPrefix(path, "/") || strings.Contains(path, "..") || strings.Contains(path, "\\") {
+			return fmt.Errorf("unsafe file path: %s", path)
+		}
+		if len(f.Content) > 1<<20 {
+			return fmt.Errorf("file %s exceeds 1MiB", path)
+		}
+	}
+	return nil
+}
+
+// buildSourceTarball packages the authored files into an in-memory tar.gz and
+// returns the bytes plus a hex-encoded SHA-256 checksum (without the prefix).
+func buildSourceTarball(files []sourceFile) ([]byte, string, error) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	now := time.Now()
+	for _, f := range files {
+		hdr := &tar.Header{
+			Name:    f.Path,
+			Mode:    0644,
+			Size:    int64(len(f.Content)),
+			ModTime: now,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, "", err
+		}
+		if _, err := tw.Write([]byte(f.Content)); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, "", err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return buf.Bytes(), hex.EncodeToString(sum[:]), nil
+}
+
+// canReadProject lets project-agnostic endpoints (e.g. GET /v1/deployments/:id)
+// gate access on the project the resource ultimately belongs to.
+// JWT users must own or be a member of the project; API keys must be scoped to
+// the same project.
+func canReadProject(c *gin.Context, st *store.Store, pid uuid.UUID) bool {
+	if v, ok := c.Get(middleware.KeyAPIKeyProj); ok {
+		if u, ok := v.(uuid.UUID); ok {
+			return u == pid
+		}
+	}
+	uidVal, ok := c.Get(middleware.KeyUserUUID)
+	if !ok {
+		return false
+	}
+	uid, ok := uidVal.(uuid.UUID)
+	if !ok {
+		return false
+	}
+	if owner, err := st.ProjectOwnerID(c.Request.Context(), pid); err == nil && owner == uid {
+		return true
+	}
+	if role, err := st.SubjectProjectRole(c.Request.Context(), pid, uid); err == nil && role != "" {
+		return true
+	}
+	if u, err := st.UserByID(c.Request.Context(), uid); err == nil {
+		if u.PlatformRole == "super_admin" || u.PlatformRole == "staff" {
+			return true
+		}
+	}
+	return false
+}
+
 func projectJSON(p store.Project) gin.H {
 	out := gin.H{
 		"id":               p.ID,
@@ -1823,6 +2620,88 @@ func retentionTicker(st *store.Store) {
 	for range t.C {
 		_ = st.PruneLogsOlderThanSettings(context.Background())
 	}
+}
+
+func routeActorUUID(c *gin.Context) *uuid.UUID {
+	v, ok := c.Get(middleware.KeyUserUUID)
+	if !ok {
+		return nil
+	}
+	id, ok := v.(uuid.UUID)
+	if !ok {
+		return nil
+	}
+	return &id
+}
+
+func buildInvokePayload(ctx context.Context, st *store.Store, cfg config.Config, pid, fid uuid.UUID, input map[string]any) datalane.InvokePayload {
+	ip := datalane.InvokePayload{Input: input}
+	if drow, er := st.LatestActiveDeploymentForFunction(ctx, fid); er == nil {
+		ip.DeploymentID = drow.ID.String()
+		pp, er2 := st.ProjectByID(ctx, pid)
+		dbURL, er3 := tenantdb.ConnectionURL(ctx, cfg, st, pid)
+		if er2 == nil && pp.MinioBucket != nil && er3 == nil {
+			_, _, sv, er4 := st.DeploymentArtifacts(ctx, drow.ID)
+			if er4 == nil {
+				ip.TenantEnv = map[string]string{
+					"TENANT_DATABASE_URL": dbURL,
+					"MINIO_ENDPOINT":      cfg.MinioEndpoint,
+					"MINIO_BUCKET":        *pp.MinioBucket,
+					"TENANT_MINIO_BUCKET": *pp.MinioBucket,
+					"MINIO_USE_SSL":       strconv.FormatBool(cfg.MinioUseSSL),
+				}
+				ip.Runtime = sv.Runtime
+				ip.Checksum = sv.Checksum
+				ip.ArtifactKey = strings.TrimPrefix(strings.TrimPrefix(sv.SourceURI, "minio://"), "/")
+			}
+		}
+	}
+	return ip
+}
+
+func runAsyncInvokeJob(ctx context.Context, st *store.Store, cfg config.Config, dp *datalane.Client, hub *realtime.Hub, pid, fid uuid.UUID, enqueueID string, input map[string]any, fnName string) {
+	ip := buildInvokePayload(ctx, st, cfg, pid, fid, input)
+	invStart := time.Now()
+	out, err := dp.Invoke(ctx, ip)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	metrics.RecordInvocation(pid.String(), fnName, result, time.Since(invStart))
+	detail := map[string]any{"enqueue_id": enqueueID, "function_id": fid.String()}
+	if err != nil {
+		detail["status"] = "error"
+		detail["error"] = err.Error()
+	} else {
+		detail["status"] = out.Status
+		detail["output"] = out.Output
+	}
+	_ = st.AppendPlatformEvent(ctx, &pid, "function.invoke.async.result", detail)
+	if hub != nil {
+		hub.Broadcast(pid, "entrypoint", detail)
+	}
+}
+
+func asyncInvokeFromNATS(st *store.Store, cfg config.Config, dp *datalane.Client, hub *realtime.Hub, raw []byte) {
+	var m struct {
+		ProjectID  string         `json:"project_id"`
+		FunctionID string         `json:"function_id"`
+		EnqueueID  string         `json:"enqueue_id"`
+		Input      map[string]any `json:"input"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	pid, e1 := uuid.Parse(m.ProjectID)
+	fid, e2 := uuid.Parse(m.FunctionID)
+	if e1 != nil || e2 != nil {
+		return
+	}
+	fn, err := st.FunctionByID(context.Background(), fid)
+	if err != nil || fn.ProjectID != pid {
+		return
+	}
+	runAsyncInvokeJob(context.Background(), st, cfg, dp, hub, pid, fid, m.EnqueueID, m.Input, fn.Name)
 }
 
 func dbConnect(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {

@@ -3,6 +3,7 @@ package realtime
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -13,12 +14,16 @@ import (
 var up = gws.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 type Hub struct {
-	mu   sync.Mutex
-	subs map[string]map[*gws.Conn]struct{}
+	mu      sync.Mutex
+	subs    map[string]map[*gws.Conn]struct{}
+	queries *queryStore
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[string]map[*gws.Conn]struct{}{}}
+	return &Hub{
+		subs:    map[string]map[*gws.Conn]struct{}{},
+		queries: newQueryStore(),
+	}
 }
 
 func key(pid uuid.UUID, channel string) string {
@@ -55,8 +60,11 @@ func (h *Hub) Broadcast(pid uuid.UUID, channel string, payload any) {
 }
 
 type wsMsg struct {
-	Op       string   `json:"op"`
-	Channels []string `json:"channels"`
+	Op             string   `json:"op"`
+	Channels       []string `json:"channels"`
+	Query          string   `json:"query,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	SubscriptionID string   `json:"subscription_id,omitempty"`
 }
 
 func HandleWS(h *Hub) gin.HandlerFunc {
@@ -71,6 +79,13 @@ func HandleWS(h *Hub) gin.HandlerFunc {
 			return
 		}
 		defer conn.Close()
+		// On disconnect, drop all SELECT-style query subscriptions held by
+		// this connection so memory doesn't leak.
+		defer func() {
+			if h.queries != nil {
+				h.queries.removeByConn(conn)
+			}
+		}()
 
 		ch := c.Query("channel")
 		if ch != "" {
@@ -87,20 +102,68 @@ func HandleWS(h *Hub) gin.HandlerFunc {
 			if json.Unmarshal(data, &msg) != nil {
 				continue
 			}
-			if msg.Op != "subscribe" || len(msg.Channels) == 0 {
-				continue
-			}
-			for _, name := range msg.Channels {
-				if name == "" {
+			switch msg.Op {
+			case "subscribe":
+				if strings.TrimSpace(msg.Query) != "" {
+					handleSelectSubscribe(h, pid, conn, msg)
 					continue
 				}
-				h.Register(pid, name, conn)
+				if len(msg.Channels) == 0 {
+					continue
+				}
+				for _, name := range msg.Channels {
+					if name == "" {
+						continue
+					}
+					h.Register(pid, name, conn)
+				}
+				resp := gin.H{"op": "subscribed", "channels": msg.Channels}
+				raw, _ := json.Marshal(resp)
+				_ = conn.WriteMessage(gws.TextMessage, raw)
+			case "unsubscribe":
+				if msg.SubscriptionID != "" && h.queries != nil {
+					h.queries.remove(msg.SubscriptionID)
+					raw, _ := json.Marshal(gin.H{"op": "unsubscribed", "subscription_id": msg.SubscriptionID})
+					_ = conn.WriteMessage(gws.TextMessage, raw)
+				}
 			}
-			resp := gin.H{"op": "subscribed", "channels": msg.Channels}
-			raw, _ := json.Marshal(resp)
-			_ = conn.WriteMessage(gws.TextMessage, raw)
 		}
 	}
+}
+
+// handleSelectSubscribe processes the PRD SELECT-style subscribe payload:
+// `{ op:"subscribe", query:"SELECT * FROM <table> [WHERE …]", mode:"diff"|"full" }`.
+// It registers the subscription on the hub's queryStore and replies with the
+// generated subscription_id. Subsequent CDC events route via BroadcastTableEvent.
+func handleSelectSubscribe(h *Hub, pid uuid.UUID, conn *gws.Conn, msg wsMsg) {
+	parsed, err := ParseQuery(msg.Query)
+	if err != nil {
+		raw, _ := json.Marshal(gin.H{"op": "error", "error": err.Error()})
+		_ = conn.WriteMessage(gws.TextMessage, raw)
+		return
+	}
+	mode := QueryModeFull
+	if strings.EqualFold(msg.Mode, string(QueryModeDiff)) {
+		mode = QueryModeDiff
+	}
+	sub := &QuerySub{
+		ID:      uuid.NewString(),
+		Project: pid,
+		Conn:    conn,
+		Table:   parsed.Table,
+		Filter:  parsed.Filter,
+		Mode:    mode,
+	}
+	h.queries.add(sub)
+	resp := gin.H{
+		"op":              "subscribed",
+		"subscription_id": sub.ID,
+		"table":           parsed.Table,
+		"filter":          parsed.Filter,
+		"mode":            string(mode),
+	}
+	raw, _ := json.Marshal(resp)
+	_ = conn.WriteMessage(gws.TextMessage, raw)
 }
 
 func HandleSSE(_ *Hub) gin.HandlerFunc {

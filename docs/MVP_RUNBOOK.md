@@ -14,19 +14,22 @@ This runbook walks through the MVP flow: **register → create project → wait 
 1. **Register and save a JWT**: call `POST /auth/register` and store the returned bearer token. The first registered user becomes `platform_role=super_admin` automatically.
 2. **Create a project**: call `POST /v1/projects` with the bearer token. Save the returned project `id` and `slug`.
 3. **Poll provisioning**: call `GET /v1/projects/:pid` until `provision_status` is `ready`. The response includes `tenant_db_name`, `minio_bucket`, `disabled`, and `provision_error` if provisioning fails.
-4. **Create the first tenant schema**: call `POST /v1/projects/:pid/db/migrate` with `{ "sql": "CREATE TABLE ..." }`. The MVP allows controlled `CREATE TABLE`, `CREATE INDEX`, selected `CREATE EXTENSION`, and `COMMENT ON` statements.
+4. **Create the first tenant schema**: call `POST /v1/projects/:pid/db/migrate` with `{ "sql": "CREATE TABLE ..." }`. The MVP allows controlled `CREATE TABLE`, `CREATE INDEX`, selected `CREATE EXTENSION`, and `COMMENT ON` statements. Successful or failed batches are appended to `db_migrations`; list them with `GET /v1/projects/:pid/migrations`.
 5. **Configure the read allowlist (optional)**: call `PATCH /v1/projects/:pid/settings/data-allowlist` with `{ "tables": ["table_name"] }`.
 6. **Upload a function artifact**: call `POST /v1/projects/:pid/functions/:fid/artifacts/presign`, upload the artifact to the returned presigned URL, then call `POST /v1/projects/:pid/functions/:fid/versions` with `artifact_key`, `checksum`, and `runtime`.
 7. **Poll build status**: call `GET /v1/projects/:pid/functions/:fid/versions/:vid/build` until `build_status` is `complete`.
 8. **Deploy the function**: call `POST /v1/projects/:pid/functions/:fid/deploy`. The control plane registers the deployment with the dataplane and injects tenant database and object storage environment values.
-9. **Invoke the deployment (project-scoped)**: call `POST /v1/projects/:pid/functions/:fid/invoke` with a JWT or `sk_...` API key.
+9. **Invoke the deployment (project-scoped)**: call `POST /v1/projects/:pid/functions/:fid/invoke` with a JWT or `sk_...` API key. For fire-and-forget execution, call `POST /v1/projects/:pid/functions/:fid/invoke/async` (returns `enqueue_id`; when `NATS_URL` is set, a JetStream consumer runs the invoke and appends a `function.invoke.async.result` platform event; without NATS the control plane still executes the job in-process asynchronously and records the same event shape).
 10. **Configure a public entrypoint (optional)**: call `POST /v1/projects/:pid/functions/:fid/entrypoint` with `auth_mode` (`public`, `signed`, or `project_key`). Read the URL with `GET .../entrypoint`.
 11. **Invoke through the public entrypoint**: call `POST /fn/{project_slug}/{function_slug}`. Supply `X-Entrypoint-Token` for `signed` mode or `Authorization: Bearer sk_...` for `project_key` mode.
 12. **Inspect observability data**: call `GET /v1/projects/:pid/observability/logs?deployment_id=&from=&to=&limit=`. Configure `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces from the control plane and dataplane.
 13. **Configure triggers**: create HTTP triggers, cron triggers (`type=cron`, `every_seconds`), database polling triggers (`type=db_poll`, `poll_seconds`), or object event triggers. HTTP ingress uses `POST /v1/ingress/:trigger_id` with `X-Webhook-Secret`. MinIO events use `POST /internal/minio-events` with `X-Minio-Webhook-Secret`.
 14. **Inspect the dead-letter queue**: call `GET /v1/projects/:pid/triggers/dlq`.
-15. **Subscribe to realtime events**: open the WebSocket endpoint and send `{ "op": "subscribe", "channels": ["triggers"] }`.
-16. **Review the API summary**: call `GET /openapi.yaml` or open [docs/API.md](API.md).
+15. **Subscribe to realtime events**: open the WebSocket endpoint and send `{ "op": "subscribe", "channels": ["triggers"] }`, or a PRD-style query subscription: `{ "op": "subscribe", "query": "SELECT * FROM your_table WHERE id == $1", "mode": "diff" }` (supported tables and filter syntax are documented in the realtime package).
+16. **Email integration (SendGrid)**: store a project key with `POST /v1/projects/:pid/integrations/email` (admin; requires `TENANT_SECRET_ENCRYPTION_KEY` for at-rest encryption), then send with `POST /v1/projects/:pid/integrations/email/send` (`to`, `subject`, `html`, optional `from` if `default_from` was saved).
+17. **Review the API summary**: call `GET /openapi.yaml` or open [docs/API.md](API.md).
+
+Bundled web UI: use **⌘K / Ctrl+K** for global search (projects, in-project functions/triggers), **P** / **L** on a function detail page to jump to Deployments or project logs (keyboard shortcuts may not fire while focus is inside a text field).
 
 ## Platform Administration (super_admin / staff)
 

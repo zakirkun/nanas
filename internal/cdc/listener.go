@@ -199,6 +199,12 @@ func (m *Manager) listen(ctx context.Context, projectID uuid.UUID) error {
 		if strings.TrimSpace(table) == "" {
 			continue
 		}
+		// Phase 8 — also route the row to SELECT-style realtime subscribers.
+		newRow, _ := payload["new"].(map[string]any)
+		oldRow, _ := payload["old"].(map[string]any)
+		opStr, _ := payload["op"].(string)
+		m.hub.BroadcastTableEvent(projectID, table, opStr, newRow, oldRow)
+
 		subs, err := m.st.CDCSubscriptionsForLookup(ctx, projectID, table)
 		if err != nil || len(subs) == 0 {
 			continue
