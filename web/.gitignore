@@ -1,0 +1,26 @@
+node_modules
+dist
+dist-ssr
+.local
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Generated API types (regenerate with `pnpm gen:api`)
+src/api/types.ts
+
+# Test artifacts
+coverage
+playwright-report
+test-results

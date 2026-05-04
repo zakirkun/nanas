@@ -1,0 +1,792 @@
+﻿openapi: 3.1.0
+info:
+  title: Nanas Control Plane API (MVP)
+  version: "1.0.0"
+  description: |
+    Open-source backend platform for multi-tenant projects. Each project is provisioned with
+    its own PostgreSQL database and S3-compatible object storage bucket. The API covers
+    authentication, project lifecycle, function versions and deployments, triggers, realtime,
+    observability, public function entrypoints, and platform administration.
+
+servers:
+  - url: http://localhost:8080
+    description: Default local Compose deployment
+
+tags:
+  - name: Auth
+  - name: Projects
+  - name: Database
+  - name: Storage
+  - name: Functions
+  - name: Triggers
+  - name: Realtime
+  - name: Observability
+  - name: Admin
+  - name: Public Function
+
+components:
+  securitySchemes:
+    BearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    BearerAPIKey:
+      type: http
+      scheme: bearer
+      description: Project-scoped API key prefixed with `sk_`.
+    WebhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, code, message]
+      properties:
+        type: { type: string, example: "about:blank" }
+        code: { type: string, example: VALIDATION_ERROR }
+        message:
+          type: object
+          properties:
+            id: { type: string }
+            en: { type: string }
+        message_preferred: { type: string }
+        instance: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message:
+                type: object
+                properties:
+                  id: { type: string }
+                  en: { type: string }
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string, nullable: true }
+        owner_id: { type: string, format: uuid }
+        region: { type: string }
+        provision_status: { type: string, enum: [pending, ready, failed] }
+        provision_error: { type: string, nullable: true }
+        tenant_db_name: { type: string, nullable: true }
+        minio_bucket: { type: string, nullable: true }
+        disabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    Function:
+      type: object
+      properties:
+        fn_id: { type: string, format: uuid }
+        name: { type: string }
+    FunctionVersion:
+      type: object
+      properties:
+        version_id: { type: string, format: uuid }
+        version: { type: string }
+        runtime: { type: string }
+        checksum: { type: string }
+        build_status: { type: string, enum: [queued, complete, failed] }
+        source_uri: { type: string }
+    BuildJob:
+      type: object
+      properties:
+        build_job_id: { type: string, format: uuid }
+        job_status: { type: string }
+        job_log: { type: string }
+    Deployment:
+      type: object
+      properties:
+        deployment_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, superseded, failed] }
+    Trigger:
+      type: object
+      properties:
+        trigger_id: { type: string, format: uuid }
+        type: { type: string, enum: [http, cron, db_poll, object] }
+        target_fn: { type: string, format: uuid }
+        config: { type: object, additionalProperties: true }
+    Entrypoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        function: { type: string }
+        auth_mode: { type: string, enum: [public, signed, project_key] }
+        enabled: { type: boolean }
+        public_url: { type: string }
+        project_slug: { type: string }
+        function_slug: { type: string }
+        secret_token: { type: string, description: "Returned only when auth_mode=signed" }
+
+  responses:
+    Unauthorized:
+      description: Authentication required.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Permission denied.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationError:
+      description: Validation error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: Too many requests.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Internal:
+      description: Internal error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+paths:
+  /healthz:
+    get:
+      tags: [Observability]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Service is alive.
+
+  /readyz:
+    get:
+      tags: [Observability]
+      summary: Readiness probe checking PostgreSQL and object storage.
+      responses:
+        '200':
+          description: Both dependencies are reachable.
+        '503':
+          $ref: '#/components/responses/Internal'
+
+  /openapi.yaml:
+    get:
+      tags: [Observability]
+      summary: Serve this OpenAPI document.
+      responses:
+        '200': { description: OpenAPI YAML }
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics scrape endpoint.
+      responses:
+        '200': { description: Prometheus text exposition format. }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user. The first user is auto-promoted to platform_role=super_admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: User created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      email: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange email and password for a JWT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/projects:
+    post:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }]
+      summary: Create a project. Tenant database and object bucket are provisioned asynchronously.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                region: { type: string, default: default }
+      responses:
+        '201':
+          description: Project created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }]
+      summary: List projects accessible to the authenticated user.
+      responses:
+        '200':
+          description: Project list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items: { $ref: '#/components/schemas/Project' }
+
+  /v1/projects/{pid}:
+    get:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Read project details, including provisioning status and tenant bindings.
+      responses:
+        '200':
+          description: Project details.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{pid}/db/migrate:
+    post:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Apply allow-listed DDL statements (CREATE TABLE, CREATE INDEX, selected CREATE EXTENSION, COMMENT ON).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sql]
+              properties:
+                sql: { type: string }
+      responses:
+        '200':
+          description: DDL applied.
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /v1/projects/{pid}/db/query:
+    post:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Execute a guarded SELECT/INSERT/UPDATE/DELETE statement, or run EXPLAIN ANALYZE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sql]
+              properties:
+                sql: { type: string }
+                params: { type: array, items: {} }
+                explain: { type: boolean }
+      responses:
+        '200':
+          description: Query result.
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /v1/projects/{pid}/storage/upload:
+    post:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Create a presigned PUT URL for the project bucket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string }
+                expires: { type: integer, description: "Seconds (default 3600)" }
+      responses:
+        '200':
+          description: Presigned URL.
+
+  /v1/projects/{pid}/storage/download:
+    post:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Create a presigned GET URL for the project bucket.
+
+  /v1/projects/{pid}/functions:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Create a function.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Function' }
+
+  /v1/projects/{pid}/functions/{fid}/artifacts/presign:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Create a presigned PUT URL for a function version artifact tarball.
+
+  /v1/projects/{pid}/functions/{fid}/versions:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Register an immutable function version and queue a build job.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string }
+                runtime: { type: string }
+                checksum: { type: string }
+                artifact_key: { type: string }
+                source_uri: { type: string }
+      responses:
+        '201':
+          description: Version queued.
+          content:
+            application/json:
+              schema: { allOf: [ { $ref: '#/components/schemas/FunctionVersion' }, { $ref: '#/components/schemas/BuildJob' } ] }
+        '409':
+          description: Version already exists.
+
+  /v1/projects/{pid}/functions/{fid}/versions/{vid}/build:
+    get:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: vid, required: true, schema: { type: string, format: uuid } }
+      summary: Read function version build status.
+
+  /v1/projects/{pid}/functions/{fid}/deploy:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Deploy a completed function version. The control plane registers the deployment with the dataplane.
+      responses:
+        '200':
+          description: Deployment created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '409':
+          description: Build is not complete.
+
+  /v1/projects/{pid}/functions/{fid}/deployments/rollback:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Reactivate the previous deployment for the function.
+
+  /v1/projects/{pid}/functions/{fid}/invoke:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Invoke the latest active deployment for a function (project-scoped).
+
+  /v1/projects/{pid}/functions/{fid}/entrypoint:
+    post:
+      tags: [Public Function]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Configure the public function entrypoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                auth_mode: { type: string, enum: [public, signed, project_key] }
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Entrypoint configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entrypoint' }
+    get:
+      tags: [Public Function]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+      summary: Read the public function entrypoint configuration.
+      responses:
+        '200':
+          description: Entrypoint configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entrypoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /fn/{project_slug}/{fn_slug}:
+    parameters:
+      - { in: path, name: project_slug, required: true, schema: { type: string } }
+      - { in: path, name: fn_slug, required: true, schema: { type: string } }
+    post:
+      tags: [Public Function]
+      summary: Public invocation entrypoint. Authentication depends on the configured auth_mode.
+      description: |
+        - `auth_mode=public`: no authentication.
+        - `auth_mode=signed`: send `X-Entrypoint-Token` header (or `?token=`) matching the entrypoint secret.
+        - `auth_mode=project_key`: send `Authorization: Bearer sk_...` for the project.
+      responses:
+        '200': { description: Function output. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/ingress/{tid}:
+    parameters:
+      - { in: path, name: tid, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Triggers]
+      security: [{ WebhookSecret: [] }]
+      summary: HTTP trigger ingress. Validates X-Webhook-Secret against the trigger configuration.
+
+  /internal/minio-events:
+    post:
+      tags: [Triggers]
+      summary: Object storage event webhook. Requires X-Minio-Webhook-Secret.
+
+  /v1/projects/{pid}/triggers:
+    post:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Create a trigger.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, target_fn]
+              properties:
+                type: { type: string, enum: [http, cron, db_poll, object] }
+                target_fn: { type: string, format: uuid }
+                config:
+                  type: object
+                  description: |
+                    For HTTP triggers, set `secret`. For cron, set `every_seconds`.
+                    For db_poll, set `poll_seconds`. For object, configure MinIO bucket events.
+      responses:
+        '201':
+          description: Trigger registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trigger' }
+
+  /v1/projects/{pid}/triggers/dlq:
+    get:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List dead-letter queue events for the project.
+
+  /v1/projects/{pid}/realtime/ws:
+    get:
+      tags: [Realtime]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: 'WebSocket endpoint. Send `{ "op":"subscribe","channels":["triggers"] }` to subscribe.'
+
+  /v1/projects/{pid}/observability/logs:
+    get:
+      tags: [Observability]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: deployment_id, schema: { type: string, format: uuid } }
+        - { in: query, name: from, schema: { type: string, format: date-time } }
+        - { in: query, name: to, schema: { type: string, format: date-time } }
+        - { in: query, name: limit, schema: { type: integer, default: 100 } }
+      summary: List function logs filtered by deployment and time range.
+
+  /v1/projects/{pid}/audit:
+    get:
+      tags: [Observability]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List audit events for the project (admin role required).
+
+  /v1/projects/{pid}/data/tables/{table}/rows:
+    get:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: table, required: true, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, default: 100 } }
+      summary: Read rows from an allow-listed tenant table.
+
+  /v1/projects/{pid}/graphql:
+    post:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Execute a GraphQL query generated from the project's table allowlist.
+
+  /v1/projects/{pid}/graphql/schema:
+    get:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Read the auto-generated GraphQL SDL for the project.
+
+  /v1/projects/{pid}/keys/{kid}/quota:
+    patch:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: kid, required: true, schema: { type: string, format: uuid } }
+      summary: 'Set or clear quota_rpm for a project API key. Pass `{ "rpm": null }` to inherit project quota.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rpm: { type: integer, nullable: true }
+
+  /v1/projects/{pid}/cdc/subscriptions:
+    post:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Subscribe a function to PostgreSQL row-level events on a tenant table via LISTEN/NOTIFY.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [function_id, table]
+              properties:
+                function_id: { type: string, format: uuid }
+                table: { type: string }
+    get:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List CDC subscriptions for the project.
+
+  /v1/projects/{pid}/cdc/subscriptions/{id}:
+    delete:
+      tags: [Triggers]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      summary: Remove a CDC subscription.
+
+  /v1/marketplace/packages:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }]
+      summary: Create or upsert a marketplace package owned by the caller.
+    get:
+      tags: [Functions]
+      summary: List marketplace packages.
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+
+  /v1/marketplace/packages/{slug}:
+    get:
+      tags: [Functions]
+      parameters:
+        - { in: path, name: slug, required: true, schema: { type: string } }
+      summary: Read a marketplace package summary.
+
+  /v1/marketplace/packages/{slug}/versions:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: path, name: slug, required: true, schema: { type: string } }
+      summary: Publish a new version of a marketplace package (semver required).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string }
+                runtime: { type: string }
+                source_uri: { type: string }
+                checksum: { type: string }
+                notes: { type: string }
+    get:
+      tags: [Functions]
+      parameters:
+        - { in: path, name: slug, required: true, schema: { type: string } }
+      summary: List versions of a marketplace package.
+
+  /v1/marketplace/packages/{slug}/versions/{version}:
+    get:
+      tags: [Functions]
+      parameters:
+        - { in: path, name: slug, required: true, schema: { type: string } }
+        - { in: path, name: version, required: true, schema: { type: string } }
+      summary: Read a single marketplace package version.
+
+  /v1/projects/{pid}/marketplace/install:
+    post:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Install a marketplace package into a project. Resolves to the highest semver when no version is supplied.
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      summary: List platform users. Requires platform_role >= staff.
+
+  /admin/users/{id}:
+    patch:
+      tags: [Admin]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      summary: Update a user platform_role. Requires platform_role=super_admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform_role]
+              properties:
+                platform_role: { type: string, enum: [super_admin, staff, user] }
+
+  /admin/projects:
+    get:
+      tags: [Admin]
+      security: [{ BearerJWT: [] }]
+      summary: List all projects across owners. Requires platform_role >= staff.
+
+  /admin/projects/{pid}/disable:
+    post:
+      tags: [Admin]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Disable a project. Returns 403 PROJECT_DISABLED for project-scoped endpoints.
+
+  /admin/projects/{pid}/enable:
+    post:
+      tags: [Admin]
+      security: [{ BearerJWT: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Re-enable a project.

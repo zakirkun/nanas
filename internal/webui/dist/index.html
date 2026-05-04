@@ -1,0 +1,36 @@
+<!doctype html>
+<!--
+  Placeholder for the Nanas SPA. The real bundle is produced by:
+
+    pnpm --dir web install
+    pnpm --dir web build
+
+  …and the resulting `web/dist/*` is copied into this directory by the
+  Dockerfile multistage build (see `Dockerfile`). Without a real bundle in
+  place the Go binary boots fine, but visiting `/` shows this page.
+
+  When `pnpm --dir web build` runs locally the produced `web/dist/index.html`
+  overwrites this file. The .gitignore in this directory keeps that overwrite
+  from being committed.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Nanas</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 60ch; margin: 0 auto; line-height: 1.5; color: #0f172a; }
+      code, pre { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 4px; }
+      pre { padding: 0.6rem; overflow:auto; }
+      h1 { font-size: 1.4rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Nanas — web UI not embedded</h1>
+    <p>The Go binary was built without an SPA bundle. Build the frontend with:</p>
+    <pre><code>pnpm --dir web install
+pnpm --dir web build</code></pre>
+    <p>Then copy <code>web/dist/*</code> into <code>internal/webui/dist/</code> and rebuild the binary, or simply run the production Docker image which does this for you.</p>
+    <p>The API itself is still available at <code>/v1/…</code>, <code>/auth/…</code>, etc.</p>
+  </body>
+</html>

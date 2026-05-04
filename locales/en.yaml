@@ -1,0 +1,195 @@
+INTERNAL_ERROR:
+  en: "Internal server error."
+  id: "Kesalahan server internal."
+
+STORAGE_UNAVAILABLE:
+  en: "Object storage is not reachable."
+  id: "Penyimpanan objek tidak dapat dijangkau."
+
+UNAUTHORIZED:
+  en: "Authentication required."
+  id: "Autentikasi diperlukan."
+
+FORBIDDEN:
+  en: "You do not have permission for this action."
+  id: "Anda tidak memiliki izin untuk tindakan ini."
+
+PLATFORM_FORBIDDEN:
+  en: "Platform-level role is required for this action."
+  id: "Peran tingkat platform diperlukan untuk tindakan ini."
+
+PROJECT_DISABLED:
+  en: "Project is disabled by a platform administrator."
+  id: "Proyek dinonaktifkan oleh administrator platform."
+
+ENTRYPOINT_NOT_FOUND:
+  en: "Public function entrypoint is not configured for this function."
+  id: "Entrypoint fungsi publik belum dikonfigurasi untuk fungsi ini."
+
+ENTRYPOINT_DISABLED:
+  en: "Public function entrypoint is disabled."
+  id: "Entrypoint fungsi publik dinonaktifkan."
+
+ENTRYPOINT_AUTH_REQUIRED:
+  en: "Public function entrypoint requires authentication."
+  id: "Entrypoint fungsi publik memerlukan autentikasi."
+
+ENTRYPOINT_BAD_AUTH_MODE:
+  en: "Auth mode must be one of: public, signed, project_key."
+  id: "Mode autentikasi harus salah satu: public, signed, project_key."
+
+ROLE_INVALID:
+  en: "Platform role must be one of: super_admin, staff, user."
+  id: "Peran platform harus salah satu: super_admin, staff, user."
+
+NOT_FOUND:
+  en: "Resource not found."
+  id: "Resource tidak ditemukan."
+
+VALIDATION_ERROR:
+  en: "Validation failed."
+  id: "Validasi gagal."
+
+PROJECT_NOT_FOUND:
+  en: "Project not found."
+  id: "Proyek tidak ditemukan."
+
+FUNCTION_NOT_FOUND:
+  en: "Function not found."
+  id: "Fungsi tidak ditemukan."
+
+DEPLOYMENT_NOT_FOUND:
+  en: "Deployment not found."
+  id: "Deployment tidak ditemukan."
+
+TRIGGER_NOT_FOUND:
+  en: "Trigger not found."
+  id: "Trigger tidak ditemukan."
+
+INVALID_CREDENTIALS:
+  en: "Invalid email or password."
+  id: "Email atau kata sandi salah."
+
+KEY_REVOKED:
+  en: "API key has been revoked."
+  id: "Kunci API telah dicabut."
+
+PROVISIONING_PENDING:
+  en: "Provisioning is still in progress."
+  id: "Provisioning masih berlangsung."
+
+RATE_LIMITED:
+  en: "Too many requests."
+  id: "Terlalu banyak permintaan."
+
+PACKAGE_NOT_FOUND:
+  en: "Marketplace package not found."
+  id: "Paket marketplace tidak ditemukan."
+
+MARKETPLACE_VERSION_NOT_FOUND:
+  en: "Marketplace package version not found."
+  id: "Versi paket marketplace tidak ditemukan."
+
+MARKETPLACE_VERSION_EXISTS:
+  en: "Marketplace package version already exists."
+  id: "Versi paket marketplace sudah ada."
+
+MARKETPLACE_VERSION_INVALID:
+  en: "Version must follow semver (MAJOR.MINOR.PATCH)."
+  id: "Versi harus mengikuti semver (MAJOR.MINOR.PATCH)."
+
+WEBHOOK_SIGNATURE_INVALID:
+  en: "Webhook signature is missing or invalid."
+  id: "Tanda tangan webhook hilang atau tidak valid."
+
+WEBHOOK_SIGNATURE_EXPIRED:
+  en: "Webhook signature timestamp is outside the allowed skew."
+  id: "Stempel waktu tanda tangan webhook di luar batas toleransi."
+
+QUOTA_RPM_INVALID:
+  en: "API key quota_rpm must be a positive integer or null."
+  id: "Kuota api_key quota_rpm harus bilangan bulat positif atau null."
+
+CDC_TABLE_INVALID:
+  en: "Tenant CDC subscription table name must be a valid identifier."
+  id: "Nama tabel langganan CDC tenant harus identifier yang valid."
+
+CDC_FUNCTION_NOT_FOUND:
+  en: "Tenant CDC subscription function does not belong to this project."
+  id: "Fungsi langganan CDC tenant bukan milik proyek ini."
+
+WASM_PHASE2:
+  en: "Wasm runtime not enabled (Phase 2)."
+  id: "Runtime Wasm tidak diaktifkan (fase 2)."
+
+VERSION_IMMUTABLE:
+  en: "This function version already exists and cannot be replaced."
+  id: "Versi fungsi ini sudah ada dan tidak dapat diganti."
+
+BUILD_PENDING:
+  en: "Build is not complete; deploy after build succeeds."
+  id: "Build belum selesai; deploy setelah build berhasil."
+
+GATEWAY_ERROR:
+  en: "Upstream execution service failed."
+  id: "Layanan eksekusi hulu gagal."
+
+# Webhook / public ingress
+
+TRIGGER_ID_INVALID:
+  en: "Invalid trigger identifier."
+  id: "Pengidentifikasi trigger tidak valid."
+
+HTTP_TRIGGER_NOT_FOUND:
+  en: "HTTP trigger was not found or is not enabled."
+  id: "Trigger HTTP tidak ditemukan atau tidak aktif."
+
+WEBHOOK_SECRET_MISMATCH:
+  en: "Invalid or missing webhook secret."
+  id: "Rahasia webhook salah atau hilang."
+
+MINIO_WEBHOOK_UNAUTHORIZED:
+  en: "MinIO webhook authentication failed."
+  id: "Autentikasi webhook MinIO gagal."
+
+OBJECT_EVENT_BODY_INVALID:
+  en: "Request body is missing or unreadable."
+  id: "Body permintaan kosong atau tidak terbaca."
+
+OBJECT_EVENT_PARSE_ERROR:
+  en: "Could not parse object storage notification."
+  id: "Tidak dapat memparse notifikasi object storage."
+
+OBJECT_BUCKET_UNKNOWN:
+  en: "No project is mapped to this bucket."
+  id: "Tidak ada proyek yang dipetakan ke bucket ini."
+
+OBJECT_KEY_INVALID:
+  en: "Object key is empty or contains unsafe path segments."
+  id: "Object key kosong atau berisi segmen path yang tidak aman."
+
+# Field-level messages (errors[].message)
+
+EMAIL_ALREADY_TAKEN:
+  en: "This email is already registered."
+  id: "Email ini sudah terdaftar."
+
+FIELD_BUILD_NOT_READY:
+  en: "Function version build is not complete yet."
+  id: "Build versi fungsi belum selesai."
+
+SQL_EXECUTION_FAILED:
+  en: "The database rejected this query."
+  id: "Database menolak query ini."
+
+TABLE_ACCESS_DENIED:
+  en: "This table is not allowed for read access."
+  id: "Tabel ini tidak diizinkan untuk akses baca."
+
+TENANT_SECRET_KEY_REQUIRED:
+  en: "Set TENANT_SECRET_ENCRYPTION_KEY (32 bytes) on the server to store encrypted secrets."
+  id: "Atur TENANT_SECRET_ENCRYPTION_KEY (32 byte) di server untuk menyimpan rahasia terenkripsi."
+
+GRAPHQL_QUERY_REQUIRED:
+  en: "A non-empty GraphQL query string is required."
+  id: "String query GraphQL yang tidak kosong diperlukan."

@@ -1,0 +1,10 @@
+# Real SPA artifacts produced by `pnpm --dir web build`. These are copied
+# here before `go build` so the binary embeds the latest UI.
+# We keep `index.html` (the placeholder) in source control so `go build`
+# never fails when the SPA hasn't been built yet.
+assets/
+favicon.svg
+favicon.ico
+*.js
+*.css
+*.map
