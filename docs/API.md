@@ -62,8 +62,10 @@ Project payload fields:
 | --- | --- | --- |
 | `POST /v1/projects/:pid/db/migrate` | developer | Apply allow-listed DDL (`CREATE TABLE`, `CREATE INDEX`, selected `CREATE EXTENSION`, `COMMENT ON`). |
 | `POST /v1/projects/:pid/db/query` | developer | Run a guarded `SELECT/INSERT/UPDATE/DELETE`. Set `explain: true` for `EXPLAIN ANALYZE`. |
+| `GET /v1/projects/:pid/data/catalog/tables` | developer | List `public` base tables (safe identifiers) from the tenant database. |
 | `GET /v1/projects/:pid/data/tables/:table/rows` | developer | Read rows from an allow-listed tenant table. |
-| `PATCH /v1/projects/:pid/settings/data-allowlist` | admin | Configure tables exposed to the read endpoint. |
+| `GET /v1/projects/:pid/settings/data-allowlist` | viewer | Read the project's table allowlist for GraphQL / read-rows. |
+| `PATCH /v1/projects/:pid/settings/data-allowlist` | developer | Replace the table allowlist (validated identifiers); use `{"tables":[]}` to clear. |
 
 ## Object Storage
 

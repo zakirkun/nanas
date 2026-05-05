@@ -33,7 +33,24 @@ func ValidateMigrateSQL(batch string) (string, error) {
 	return s, validateOne(s)
 }
 
+// stripLeadingLineComments drops blank lines and full-line "-- ..." SQL comments at
+// the start of a statement so validation matches Postgres (which ignores them).
+func stripLeadingLineComments(s string) string {
+	lines := strings.Split(s, "\n")
+	i := 0
+	for i < len(lines) {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "--") {
+			i++
+			continue
+		}
+		break
+	}
+	return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+}
+
 func validateOne(one string) error {
+	one = stripLeadingLineComments(strings.TrimSpace(one))
 	if one == "" {
 		return nil
 	}

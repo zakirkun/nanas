@@ -12,10 +12,11 @@ import (
 )
 
 type ProjectSettings struct {
-	ProjectID        uuid.UUID
-	LogRetentionDays int
-	APIQuotaRPM      int
-	TableAllowlist   json.RawMessage
+	ProjectID         uuid.UUID
+	LogRetentionDays  int
+	APIQuotaRPM       int
+	TableAllowlist    json.RawMessage
+	DatabaseAllowlist json.RawMessage
 }
 
 func (s *Store) UpsertProjectSettingsDefaults(ctx context.Context, projectID uuid.UUID) error {
@@ -29,9 +30,10 @@ func (s *Store) SettingsForProject(ctx context.Context, pid uuid.UUID) (ProjectS
 	var ps ProjectSettings
 	err := s.pool.QueryRow(ctx,
 		`SELECT project_id, log_retention_days, api_quota_rpm,
-		        COALESCE(table_allowlist::text,'[]')::jsonb
+		        COALESCE(table_allowlist::text,'[]')::jsonb,
+		        COALESCE(database_allowlist::text,'[]')::jsonb
 		 FROM project_settings WHERE project_id=$1`, pid,
-	).Scan(&ps.ProjectID, &ps.LogRetentionDays, &ps.APIQuotaRPM, &ps.TableAllowlist)
+	).Scan(&ps.ProjectID, &ps.LogRetentionDays, &ps.APIQuotaRPM, &ps.TableAllowlist, &ps.DatabaseAllowlist)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if uerr := s.UpsertProjectSettingsDefaults(ctx, pid); uerr != nil {
 			return ProjectSettings{}, uerr
@@ -45,6 +47,14 @@ func (s *Store) PatchProjectSettingsAllowlistJSON(ctx context.Context, pid uuid.
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO project_settings(project_id,table_allowlist) VALUES($1,$2::jsonb)
 		 ON CONFLICT (project_id) DO UPDATE SET table_allowlist=EXCLUDED.table_allowlist, updated_at=now()`,
+		pid, rawAllowlistJSON)
+	return err
+}
+
+func (s *Store) PatchProjectSettingsDatabaseAllowlistJSON(ctx context.Context, pid uuid.UUID, rawAllowlistJSON []byte) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO project_settings(project_id,database_allowlist) VALUES($1,$2::jsonb)
+		 ON CONFLICT (project_id) DO UPDATE SET database_allowlist=EXCLUDED.database_allowlist, updated_at=now()`,
 		pid, rawAllowlistJSON)
 	return err
 }

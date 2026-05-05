@@ -99,6 +99,22 @@ func ConnectionURL(ctx context.Context, cfg config.Config, st *store.Store, proj
 	return fmt.Sprintf("postgres://%s@%s/%s%s", creds, hostPort, *p.TenantDBName, q), nil
 }
 
+// normalizeTenantQuerySQL trims whitespace and trailing semicolons so a single statement
+// sent as "SELECT 1;" is allowed; semicolons elsewhere still imply multiple statements.
+func normalizeTenantQuerySQL(sqlText string) (string, error) {
+	s := strings.TrimSpace(sqlText)
+	for strings.HasSuffix(s, ";") {
+		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
+	}
+	if s == "" {
+		return "", fmt.Errorf("empty sql")
+	}
+	if strings.Contains(s, ";") {
+		return "", fmt.Errorf("multiple statements blocked")
+	}
+	return s, nil
+}
+
 func Query(ctx context.Context, cfg config.Config, st *store.Store, projectID uuid.UUID, sqlText string, args []any) ([]map[string]any, pgconn.CommandTag, error) {
 	pool, err := poolForProject(ctx, cfg, st, projectID)
 	if err != nil {
@@ -106,16 +122,17 @@ func Query(ctx context.Context, cfg config.Config, st *store.Store, projectID uu
 	}
 	defer pool.Close()
 
-	trim := strings.ToLower(strings.TrimSpace(sqlText))
-	if strings.Contains(trim, ";") {
-		return nil, pgconn.CommandTag{}, fmt.Errorf("multiple statements blocked")
+	sqlNorm, err := normalizeTenantQuerySQL(sqlText)
+	if err != nil {
+		return nil, pgconn.CommandTag{}, err
 	}
+	trim := strings.ToLower(sqlNorm)
 	if err := validateTenantQuery(trim); err != nil {
 		return nil, pgconn.CommandTag{}, err
 	}
 
 	if strings.HasPrefix(trim, "select") {
-		rows, err := pool.Query(ctx, sqlText, args...)
+		rows, err := pool.Query(ctx, sqlNorm, args...)
 		if err != nil {
 			return nil, pgconn.CommandTag{}, err
 		}
@@ -139,11 +156,38 @@ func Query(ctx context.Context, cfg config.Config, st *store.Store, projectID uu
 		return result, pgconn.CommandTag{}, rows.Err()
 	}
 
-	tag, err := pool.Exec(ctx, sqlText, args...)
+	tag, err := pool.Exec(ctx, sqlNorm, args...)
 	return nil, tag, err
 }
 
 var reIdent = regexp.MustCompile(`(?i)^[a-z_][a-z0-9_]*$`)
+
+// ValidSQLIdentifier matches unquoted Postgres identifiers used across tenant APIs.
+func ValidSQLIdentifier(s string) bool {
+	return reIdent.MatchString(strings.TrimSpace(s))
+}
+
+// NormalizeAllowlistTables trims, validates identifiers, and de-duplicates case-insensitively.
+func NormalizeAllowlistTables(in []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, raw := range in {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		if !ValidSQLIdentifier(t) {
+			return nil, fmt.Errorf("invalid table name %q", t)
+		}
+		key := strings.ToLower(t)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out, nil
+}
 
 func validateTenantQuery(trim string) error {
 	blocked := []string{
@@ -202,6 +246,34 @@ func TableColumns(ctx context.Context, cfg config.Config, st *store.Store, proje
 	return out, rows.Err()
 }
 
+// ListPublicBaseTables returns physical table names in public schema that match safe identifier rules.
+func ListPublicBaseTables(ctx context.Context, cfg config.Config, st *store.Store, projectID uuid.UUID) ([]string, error) {
+	pool, err := poolForProject(ctx, cfg, st, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer pool.Close()
+	rows, err := pool.Query(ctx,
+		`SELECT table_name FROM information_schema.tables
+		 WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+		 ORDER BY table_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if ValidSQLIdentifier(name) {
+			out = append(out, name)
+		}
+	}
+	return out, rows.Err()
+}
+
 // SelectAllowedTable runs SELECT limited to identifier table name validated against allowlist JSON array.
 func SelectAllowedTable(ctx context.Context, cfg config.Config, st *store.Store, projectID uuid.UUID, table string, allowlistJSON json.RawMessage, limit int) ([]map[string]any, error) {
 	t := strings.TrimSpace(table)
@@ -232,8 +304,12 @@ func SelectAllowedTable(ctx context.Context, cfg config.Config, st *store.Store,
 
 // ExplainAnalyzeJSON runs EXPLAIN for a SELECT-only statement (caller must whitelist).
 func ExplainAnalyzeJSON(ctx context.Context, cfg config.Config, st *store.Store, projectID uuid.UUID, selectSQL string, args []any) (json.RawMessage, error) {
-	trim := strings.ToLower(strings.TrimSpace(selectSQL))
-	if strings.Contains(trim, ";") || !strings.HasPrefix(trim, "select ") {
+	sqlNorm, err := normalizeTenantQuerySQL(selectSQL)
+	if err != nil {
+		return nil, err
+	}
+	trim := strings.ToLower(sqlNorm)
+	if !strings.HasPrefix(trim, "select") {
 		return nil, fmt.Errorf("only single select for explain")
 	}
 	pool, err := poolForProject(ctx, cfg, st, projectID)
@@ -241,7 +317,7 @@ func ExplainAnalyzeJSON(ctx context.Context, cfg config.Config, st *store.Store,
 		return nil, err
 	}
 	defer pool.Close()
-	explain := "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + selectSQL
+	explain := "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sqlNorm
 	rows, err := pool.Query(ctx, explain, args...)
 	if err != nil {
 		return nil, err
@@ -255,4 +331,59 @@ func ExplainAnalyzeJSON(ctx context.Context, cfg config.Config, st *store.Store,
 		return nil, err
 	}
 	return json.RawMessage(raw), rows.Err()
+}
+
+// ListDatabaseNames returns non-template databases visible from the tenant connection.
+func ListDatabaseNames(ctx context.Context, cfg config.Config, st *store.Store, projectID uuid.UUID) ([]string, error) {
+	pool, err := poolForProject(ctx, cfg, st, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer pool.Close()
+	rows, err := pool.Query(ctx,
+		`SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// ValidateDatabaseAllowlist keeps only databases that exist on the cluster (case-insensitive match).
+func ValidateDatabaseAllowlist(requested []string, cluster []string) ([]string, error) {
+	clusterByLower := make(map[string]string, len(cluster))
+	for _, c := range cluster {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		clusterByLower[strings.ToLower(c)] = c
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, raw := range requested {
+		r := strings.TrimSpace(raw)
+		if r == "" {
+			continue
+		}
+		canonical, ok := clusterByLower[strings.ToLower(r)]
+		if !ok {
+			return nil, fmt.Errorf("database %q not found on cluster", r)
+		}
+		key := strings.ToLower(canonical)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, canonical)
+	}
+	return out, nil
 }

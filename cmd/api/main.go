@@ -1188,6 +1188,25 @@ func main() {
 		c.JSON(200, gin.H{"migrations": rows})
 	})
 
+	v1.GET("/projects/:pid/db/databases", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		dbNames, err := tenantdb.ListDatabaseNames(c.Request.Context(), cfg, st, pid)
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		ps, err := st.SettingsForProject(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		var allow []string
+		if len(ps.DatabaseAllowlist) > 0 {
+			_ = json.Unmarshal(ps.DatabaseAllowlist, &allow)
+		}
+		c.JSON(200, gin.H{"databases": dbNames, "allowlist": allow})
+	})
+
 	v1.POST("/projects/:pid/db/query", middleware.RequirePermission("developer"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
 		var body struct {
@@ -1531,16 +1550,42 @@ func main() {
 		c.JSON(200, gin.H{"logs_days": body.LogsDays, "traces_days": body.TracesDays})
 	})
 
-	v1.PATCH("/projects/:pid/settings/data-allowlist", middleware.RequirePermission("admin"), func(c *gin.Context) {
+	v1.GET("/projects/:pid/settings/data-allowlist", middleware.RequirePermission("viewer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		ps, err := st.SettingsForProject(c.Request.Context(), pid)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		var tables []string
+		if len(ps.TableAllowlist) > 0 {
+			_ = json.Unmarshal(ps.TableAllowlist, &tables)
+		}
+		if tables == nil {
+			tables = []string{}
+		}
+		c.JSON(200, gin.H{"tables": tables})
+	})
+
+	v1.PATCH("/projects/:pid/settings/data-allowlist", middleware.RequirePermission("developer"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
 		var body struct {
 			Tables []string `json:"tables"`
 		}
-		if err := c.BindJSON(&body); err != nil || len(body.Tables) == 0 {
+		if err := c.BindJSON(&body); err != nil || body.Tables == nil {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
 			return
 		}
-		b, err := json.Marshal(body.Tables)
+		normalized, err := tenantdb.NormalizeAllowlistTables(body.Tables)
+		if err != nil {
+			em := err.Error()
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{
+				Field:   "tables",
+				Message: apierr.LocaleMsg{ID: em, EN: em},
+			}})
+			return
+		}
+		b, err := json.Marshal(normalized)
 		if err != nil {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
 			return
@@ -1549,7 +1594,52 @@ func main() {
 			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
 			return
 		}
-		c.JSON(200, gin.H{"tables": body.Tables})
+		c.JSON(200, gin.H{"tables": normalized})
+	})
+
+	v1.PATCH("/projects/:pid/settings/database-allowlist", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		var body struct {
+			Databases []string `json:"databases"`
+		}
+		if err := c.BindJSON(&body); err != nil || body.Databases == nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		cluster, err := tenantdb.ListDatabaseNames(c.Request.Context(), cfg, st, pid)
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		normalized, err := tenantdb.ValidateDatabaseAllowlist(body.Databases, cluster)
+		if err != nil {
+			em := err.Error()
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{
+				Field:   "databases",
+				Message: apierr.LocaleMsg{ID: em, EN: em},
+			}})
+			return
+		}
+		raw, err := json.Marshal(normalized)
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		if err := st.PatchProjectSettingsDatabaseAllowlistJSON(c.Request.Context(), pid, raw); err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		c.JSON(200, gin.H{"databases": normalized})
+	})
+
+	v1.GET("/projects/:pid/data/catalog/tables", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		tables, err := tenantdb.ListPublicBaseTables(c.Request.Context(), cfg, st, pid)
+		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "tenant", Message: bun.AsLocaleMsg("SQL_EXECUTION_FAILED")}})
+			return
+		}
+		c.JSON(200, gin.H{"tables": tables})
 	})
 
 	v1.GET("/projects/:pid/data/tables/:table/rows", middleware.RequirePermission("developer"), func(c *gin.Context) {

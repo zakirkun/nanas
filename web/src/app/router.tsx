@@ -14,8 +14,10 @@ import { ProjectSettingsTab } from '@/features/projects/ProjectSettingsTab';
 import { DatabaseLayout } from '@/features/database/DatabaseLayout';
 import { MigratePage } from '@/features/database/MigratePage';
 import { QueryConsolePage } from '@/features/database/QueryConsolePage';
+import { TablesCatalogPage } from '@/features/database/TablesCatalogPage';
 import { TablesBrowserPage } from '@/features/database/TablesBrowserPage';
 import { GraphQLPlaygroundPage } from '@/features/database/GraphQLPlaygroundPage';
+import { DatabasesPage } from '@/features/database/DatabasesPage';
 
 import { StorageBrowserPage } from '@/features/storage/StorageBrowserPage';
 
@@ -92,6 +94,8 @@ const router = createBrowserRouter([
           { index: true, element: <Navigate to="query" replace /> },
           { path: 'migrate', element: <MigratePage /> },
           { path: 'query', element: <QueryConsolePage /> },
+          { path: 'catalog', element: <TablesCatalogPage /> },
+          { path: 'databases', element: <DatabasesPage /> },
           { path: 'tables', element: <TablesBrowserPage /> },
           { path: 'graphql', element: <GraphQLPlaygroundPage /> },
         ],

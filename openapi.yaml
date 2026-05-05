@@ -328,6 +328,52 @@ paths:
       responses:
         '200': { description: Migration history. }
 
+  /v1/projects/{pid}/db/databases:
+    get:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List Postgres databases visible from the tenant connection and the stored database allowlist.
+      responses:
+        '200':
+          description: Cluster database names and allowlist.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  databases:
+                    type: array
+                    items: { type: string }
+                  allowlist:
+                    type: array
+                    items: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /v1/projects/{pid}/settings/database-allowlist:
+    patch:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Replace the project's database allowlist (names must exist on the cluster).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [databases]
+              properties:
+                databases:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated allowlist.
+        '400': { $ref: '#/components/responses/ValidationError' }
+
   /v1/projects/{pid}/db/query:
     post:
       tags: [Database]
@@ -961,6 +1007,66 @@ paths:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
         - { in: query, name: limit, schema: { type: integer, default: 100 } }
       summary: List audit events for the project (admin role required).
+
+  /v1/projects/{pid}/settings/data-allowlist:
+    get:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Read the project's table allowlist (GraphQL / read-rows endpoint).
+      responses:
+        '200':
+          description: Allowlisted table names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables:
+                    type: array
+                    items: { type: string }
+    patch:
+      tags: [Projects]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: Replace the project's table allowlist (validated identifiers; empty clears).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tables]
+              properties:
+                tables:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated allowlist.
+
+  /v1/projects/{pid}/data/catalog/tables:
+    get:
+      tags: [Database]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+      summary: List BASE TABLE names in the tenant DB public schema (safe identifiers only).
+      responses:
+        '200':
+          description: Table names sorted alphabetically.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables:
+                    type: array
+                    items: { type: string }
 
   /v1/projects/{pid}/data/tables/{table}/rows:
     get:

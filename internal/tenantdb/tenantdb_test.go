@@ -1,6 +1,56 @@
 package tenantdb
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestNormalizeTenantQuerySQL(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		ok   bool
+	}{
+		{name: "select trailing semicolon", sql: "SELECT 1 AS hello;", ok: true},
+		{name: "select trailing repeated semicolons", sql: "SELECT 1;;;", ok: true},
+		{name: "multi statement blocked", sql: "SELECT 1; SELECT 2", ok: false},
+		{name: "only whitespace semicolon empty", sql: " ; ", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeTenantQuerySQL(tt.sql)
+			if tt.ok {
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				if strings.Contains(got, ";") {
+					t.Fatalf("normalized sql still contains semicolon: %q", got)
+				}
+			} else if err == nil {
+				t.Fatalf("expected error, got %q", got)
+			}
+		})
+	}
+}
+
+func TestNormalizeAllowlistTables(t *testing.T) {
+	out, err := NormalizeAllowlistTables([]string{" A ", "b", "a", "bad-name"})
+	if err == nil {
+		t.Fatal("expected error for invalid identifier")
+	}
+	out, err = NormalizeAllowlistTables([]string{"orders", "Orders", "items"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("got %v want 2 unique tables", out)
+	}
+	out, err = NormalizeAllowlistTables([]string{})
+	if err != nil || len(out) != 0 {
+		t.Fatalf("empty: %#v %v", out, err)
+	}
+}
 
 func TestValidateTenantQuery(t *testing.T) {
 	tests := []struct {

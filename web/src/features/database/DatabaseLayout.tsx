@@ -13,6 +13,8 @@ export function DatabaseLayout() {
         items={[
           { to: `/app/projects/${pid}/database/query`, label: t('database.query') },
           { to: `/app/projects/${pid}/database/migrate`, label: t('database.migrate') },
+          { to: `/app/projects/${pid}/database/catalog`, label: t('database.catalog') },
+          { to: `/app/projects/${pid}/database/databases`, label: t('database.databases') },
           { to: `/app/projects/${pid}/database/tables`, label: t('database.tables') },
           { to: `/app/projects/${pid}/database/graphql`, label: t('database.graphql') },
         ]}

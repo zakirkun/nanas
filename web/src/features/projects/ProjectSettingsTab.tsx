@@ -103,7 +103,7 @@ function DataAllowlistCard({ pid }: { pid: string }) {
         <div className="flex justify-end">
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || tables.length === 0 || invalid.length > 0}
+            disabled={save.isPending || invalid.length > 0}
           >
             <Save className="mr-2 h-4 w-4" /> {t('common.save')}
           </Button>

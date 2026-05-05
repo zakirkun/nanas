@@ -44,7 +44,7 @@ export function ProjectsListPage() {
       {error ? <ProblemAlert error={error} /> : null}
 
       {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3 [&>*]:min-w-0">
           {[0, 1, 2].map((i) => (
             <Skeleton key={i} className="h-36 w-full" />
           ))}
@@ -61,12 +61,12 @@ export function ProjectsListPage() {
           }
         />
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3 [&>*]:min-w-0">
           {projects.map((p) => (
-            <Card key={p.id} className="transition-shadow hover:shadow-md">
+            <Card key={p.id} className="min-w-0 transition-shadow hover:shadow-md">
               <CardContent className="space-y-3 pt-6">
-                <div className="flex items-start justify-between">
-                  <div>
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <div className="min-w-0">
                     <h3 className="text-base font-semibold">
                       <Link to={`/app/projects/${p.id}`} className="hover:underline">
                         {p.name}
@@ -78,22 +78,24 @@ export function ProjectsListPage() {
                   </div>
                   <StatusBadge value={p.disabled ? 'disabled' : p.provision_status} />
                 </div>
-                <dl className="grid grid-cols-2 gap-2 text-xs">
-                  <div>
+                <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                  <div className="min-w-0">
                     <dt className="text-muted-foreground">{t('projects.tenantDb')}</dt>
-                    <dd className="font-mono text-foreground">{p.tenant_db_name ?? '—'}</dd>
+                    <dd className="break-all font-mono leading-snug text-foreground">
+                      {p.tenant_db_name ?? '—'}
+                    </dd>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <dt className="text-muted-foreground">{t('projects.minioBucket')}</dt>
-                    <dd className="font-mono text-foreground">{p.minio_bucket ?? '—'}</dd>
+                    <dd className="break-all font-mono leading-snug text-foreground">{p.minio_bucket ?? '—'}</dd>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <dt className="text-muted-foreground">{t('projects.regionLabel')}</dt>
-                    <dd className="font-mono text-foreground">{p.region}</dd>
+                    <dd className="break-all font-mono leading-snug text-foreground">{p.region}</dd>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <dt className="text-muted-foreground">{t('common.createdAt')}</dt>
-                    <dd className="font-mono text-foreground">
+                    <dd className="break-all font-mono leading-snug text-foreground">
                       {p.created_at ? format(new Date(p.created_at), 'yyyy-MM-dd') : '—'}
                     </dd>
                   </div>

@@ -14,6 +14,8 @@ func TestValidateMigrateSQL(t *testing.T) {
 		{name: "blocked extension", sql: `CREATE EXTENSION dblink`, ok: false},
 		{name: "drop blocked", sql: `DROP TABLE items`, ok: false},
 		{name: "select blocked", sql: `SELECT * FROM items`, ok: false},
+		{name: "leading line comment before create table", sql: "-- hi\nCREATE TABLE items (id UUID PRIMARY KEY)", ok: true},
+		{name: "leading comment multi-statement", sql: "-- Allow-listed:\nCREATE TABLE items (id UUID PRIMARY KEY);\nCREATE INDEX idx_items_id ON items(id)", ok: true},
 	}
 
 	for _, tt := range tests {
