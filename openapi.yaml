@@ -14,16 +14,38 @@ servers:
 
 tags:
   - name: Auth
+    description: >
+      Register accounts and exchange email and password for JWT bearer tokens used on control-plane routes.
   - name: Projects
+    description: >
+      Create projects, inspect provisioning status, manage members and API keys, and tune project-level settings.
   - name: Database
+    description: >
+      Apply allow-listed DDL to tenant PostgreSQL databases, run guarded SQL, migrations history, data catalog access, and CDC helpers where exposed.
   - name: Storage
+    description: >
+      Upload and download tenant-scoped objects via API-relative paths proxied to S3-compatible storage.
   - name: Functions
+    description: >
+      Manage functions, artifact uploads, immutable versions, builds, deployments, rollback, and project-scoped invocation.
   - name: Triggers
+    description: >
+      Configure HTTP, cron, database polling, object-event, and related ingress surfaces plus DLQ inspection.
   - name: Realtime
+    description: >
+      Subscribe to broadcast platform events over WebSocket (and SSE stubs where implemented).
   - name: Observability
+    description: >
+      Read structured logs, audit trails, Prometheus metrics, and optional trace summaries tied to deployments.
   - name: Integrations
+    description: >
+      Configure external connectors such as outbound email providers with encrypted tenant secrets.
   - name: Admin
+    description: >
+      Platform-operator endpoints for cross-tenant user and project governance requiring staff or super-admin roles.
   - name: Public Function
+    description: >
+      Stable `/fn/{project_slug}/{function_slug}` entrypoints forwarded to the dataplane with configurable auth modes.
 
 components:
   securitySchemes:

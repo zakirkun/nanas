@@ -53,7 +53,7 @@ Check service health:
 
 Once the stack is up, the bundled web UI is reachable at `http://localhost:8080/`. The single binary serves both the API and the React SPA from the same origin.
 
-Follow the full onboarding flow in [docs/MVP_RUNBOOK.md](docs/MVP_RUNBOOK.md). Detailed endpoint reference lives in [docs/API.md](docs/API.md). The MVP 2 roadmap is in [docs/MVP2_PLAN.md](docs/MVP2_PLAN.md).
+Documentation overview and links: [docs/README.md](docs/README.md). Follow the full onboarding flow in [docs/MVP_RUNBOOK.md](docs/MVP_RUNBOOK.md). Detailed endpoint reference lives in [docs/API.md](docs/API.md). The MVP 2 roadmap is in [docs/MVP2_PLAN.md](docs/MVP2_PLAN.md).
 
 ## Web UI
 
