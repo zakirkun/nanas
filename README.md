@@ -68,6 +68,50 @@ pnpm dev          # http://localhost:5173, proxies API to :8080
 
 See [`web/README.md`](web/README.md) for the full developer guide.
 
+### Screenshots
+
+Static captures of the bundled dashboard live under [`screenshot/`](screenshot/). Paths below are relative to the repository root.
+
+#### Home
+
+![Home — dashboard landing](screenshot/home.png)
+
+#### Project overview
+
+![Project overview tab](screenshot/overview.png)
+
+#### Database
+
+![Database workspace](screenshot/database.png)
+
+#### Storage
+
+![Object storage browser](screenshot/storage.png)
+
+#### Functions
+
+![Functions list](screenshot/function.png)
+
+#### Function detail
+
+![Function detail — versions and deployments](screenshot/function-detail.png)
+
+#### Function invoke
+
+![Invoke function from the UI](screenshot/function-invoke.png)
+
+#### Triggers
+
+![Triggers configuration](screenshot/trigger.png)
+
+#### Realtime
+
+![Realtime events](screenshot/realtime.png)
+
+#### Metrics
+
+![Project metrics](screenshot/metrics.png)
+
 ## Roles
 
 Nanas uses two RBAC dimensions.
