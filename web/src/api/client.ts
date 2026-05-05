@@ -82,6 +82,27 @@ export function apiOrigin(): string {
   return window.location.origin;
 }
 
+/** Prefix a path with the API origin unless it is already absolute. */
+export function resolveApiHttpUrl(pathOrAbsolute: string): string {
+  if (pathOrAbsolute.startsWith('http://') || pathOrAbsolute.startsWith('https://')) {
+    return pathOrAbsolute;
+  }
+  const origin = apiOrigin();
+  const path = pathOrAbsolute.startsWith('/') ? pathOrAbsolute : `/${pathOrAbsolute}`;
+  return `${origin}${path}`;
+}
+
+/** Headers for XMLHttpRequest against the API (auth + Accept-Language). */
+export function xhrApiHeaders(): Record<string, string> {
+  const lang = (i18n.language || 'en').toLowerCase().startsWith('id') ? 'id, en' : 'en, id';
+  const h: Record<string, string> = {
+    'Accept-Language': lang,
+    Accept: '*/*',
+    ...authHeader(),
+  };
+  return h;
+}
+
 /** Shape Authorization header value for raw fetches that bypass openapi-fetch. */
 export function authHeader(): Record<string, string> {
   const t = useSession.getState().token;

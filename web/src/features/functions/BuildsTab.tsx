@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,6 +21,12 @@ export function BuildsTab() {
   const { pid, fid } = useParams();
   const versions = useLocalCache(`versions:${fid}`, pid);
   const [vid, setVid] = useState<string>(versions[0]?.id ?? '');
+
+  useEffect(() => {
+    if (vid !== '') return;
+    const first = versions[0]?.id;
+    if (first) setVid(first);
+  }, [versions, vid]);
 
   const build = useBuildStatus(pid!, fid!, vid);
 

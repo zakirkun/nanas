@@ -403,7 +403,7 @@ paths:
       security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
       parameters:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
-      summary: Create a presigned PUT URL for the project bucket.
+      summary: Returns an API-relative PUT path to upload an object via the control plane (MinIO proxy).
       requestBody:
         required: true
         content:
@@ -413,10 +413,10 @@ paths:
               required: [key]
               properties:
                 key: { type: string }
-                expires: { type: integer, description: "Seconds (default 3600)" }
+                expires: { type: integer, description: "Deprecated; ignored (kept for compatibility)." }
       responses:
         '200':
-          description: Presigned URL.
+          description: Upload target (PUT with Authorization to upload_url).
 
   /v1/projects/{pid}/storage/objects:
     get:
@@ -432,6 +432,28 @@ paths:
         '200': { description: Object list. }
 
   /v1/projects/{pid}/storage/objects/{key}:
+    get:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: key, required: true, schema: { type: string } }
+      summary: Download an object from the project bucket through the API (streams from MinIO).
+      responses:
+        '200':
+          description: Object bytes.
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Storage]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: key, required: true, schema: { type: string } }
+      summary: Upload or replace an object via the API (stored in MinIO on the backend).
+      responses:
+        '200':
+          description: Stored.
+        '400': { $ref: '#/components/responses/ValidationError' }
     delete:
       tags: [Storage]
       security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
@@ -448,7 +470,7 @@ paths:
       security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
       parameters:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
-      summary: Create a presigned GET URL for the project bucket.
+      summary: Returns an API-relative GET path to download via the control plane (MinIO proxy).
 
   /v1/projects/{pid}/functions:
     post:
@@ -587,6 +609,19 @@ paths:
       responses:
         '200': { description: Tarball uploaded; returns artifact_key + checksum. }
 
+  /v1/projects/{pid}/functions/{fid}/artifacts/upload:
+    put:
+      tags: [Functions]
+      security: [{ BearerJWT: [] }, { BearerAPIKey: [] }]
+      parameters:
+        - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: version, required: true, schema: { type: string } }
+      summary: Upload a function artifact tarball via the API (stored in MinIO on the backend).
+      responses:
+        '200':
+          description: Accepted and stored.
+
   /v1/projects/{pid}/functions/{fid}/artifacts/presign:
     post:
       tags: [Functions]
@@ -594,7 +629,7 @@ paths:
       parameters:
         - { in: path, name: pid, required: true, schema: { type: string, format: uuid } }
         - { in: path, name: fid, required: true, schema: { type: string, format: uuid } }
-      summary: Create a presigned PUT URL for a function version artifact tarball.
+      summary: Returns an API-relative PUT URL (with query version=) for artifact tarball upload via the API proxy.
 
   /v1/projects/{pid}/functions/{fid}/versions:
     post:

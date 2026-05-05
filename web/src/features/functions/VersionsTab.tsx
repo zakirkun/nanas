@@ -20,6 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { ProblemAlert } from '@/components/data/ProblemAlert';
 import { EmptyState } from '@/components/data/EmptyState';
+import { resolveApiHttpUrl, xhrApiHeaders } from '@/api/client';
 import { useFunctionVersions, usePresignArtifact, useRegisterVersion } from './queries';
 
 export function VersionsTab() {
@@ -47,7 +48,10 @@ export function VersionsTab() {
       setProgress(0);
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open(ps.method, ps.upload_url, true);
+        xhr.open(ps.method, resolveApiHttpUrl(ps.upload_url), true);
+        const headers = xhrApiHeaders();
+        Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+        xhr.setRequestHeader('Content-Type', 'application/gzip');
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100));
         };

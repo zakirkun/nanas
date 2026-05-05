@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -852,16 +854,65 @@ func main() {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
 			return
 		}
-		ex := time.Duration(body.Expires) * time.Second
-		if ex <= 0 {
-			ex = time.Hour
-		}
-		url, err := miniox.PresignPut(c.Request.Context(), cfg, *pv.MinioBucket, key, ex)
+		q := url.Values{}
+		q.Set("version", strings.TrimSpace(body.Version))
+		relPath := fmt.Sprintf("/v1/projects/%s/functions/%s/artifacts/upload?%s", pid.String(), fid.String(), q.Encode())
+		c.JSON(200, gin.H{
+			"upload_url":   relPath,
+			"method":       "PUT",
+			"bucket":       *pv.MinioBucket,
+			"artifact_key": key,
+			"proxy":        true,
+		})
+	})
+
+	v1.PUT("/projects/:pid/functions/:fid/artifacts/upload", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		fid, err := uuid.Parse(c.Param("fid"))
 		if err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
+			return
+		}
+		fn, err := st.FunctionByID(c.Request.Context(), fid)
+		if err != nil || fn.ProjectID != pid {
+			httpx.Problem(c, bun, 404, "FUNCTION_NOT_FOUND", nil)
+			return
+		}
+		pv, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || pv.MinioBucket == nil || strings.TrimSpace(pv.ProvisionStatus) != "ready" {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		version := strings.TrimSpace(c.Query("version"))
+		if version == "" {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "version", Message: bun.AsLocaleMsg("VALIDATION_ERROR")}})
+			return
+		}
+		key := "artifacts/" + pid.String() + "/" + fid.String() + "/" + version + ".tar.gz"
+		if err := miniox.ValidateObjectKey(key); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
+			return
+		}
+		ct := strings.TrimSpace(c.GetHeader("Content-Type"))
+		if ct == "" {
+			ct = "application/gzip"
+		}
+		size := c.Request.ContentLength
+		ui, err := miniox.PutReader(c.Request.Context(), cfg, *pv.MinioBucket, key, c.Request.Body, size, ct)
+		if err != nil {
+			slog.Error("artifact upload proxy", "err", err)
 			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
 			return
 		}
-		c.JSON(200, gin.H{"upload_url": url, "method": "PUT", "bucket": *pv.MinioBucket, "artifact_key": key})
+		etag := strings.Trim(ui.ETag, `"`)
+		_ = st.UpsertObject(c.Request.Context(), pid, *pv.MinioBucket, key, ui.Size, etag)
+		var actor *uuid.UUID
+		if v, ok := c.Get(middleware.KeyUserUUID); ok {
+			u := v.(uuid.UUID)
+			actor = &u
+		}
+		_ = st.Audit(c.Request.Context(), &pid, actor, "artifact.upload", key, map[string]any{"size": ui.Size})
+		c.JSON(200, gin.H{"artifact_key": key, "size": ui.Size, "etag": etag})
 	})
 
 	v1.POST("/projects/:pid/functions/:fid/versions", middleware.RequirePermission("developer"), func(c *gin.Context) {
@@ -1264,21 +1315,20 @@ func main() {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
 			return
 		}
-		ex := time.Duration(body.Expires) * time.Second
-		if ex <= 0 {
-			ex = time.Hour
-		}
 		if err := miniox.ValidateObjectKey(body.Key); err != nil {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
 			return
 		}
-		url, err := miniox.PresignPut(c.Request.Context(), cfg, *p.MinioBucket, body.Key, ex)
-		if err != nil {
-			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
-			return
-		}
 		_ = st.UpsertObject(c.Request.Context(), pid, *p.MinioBucket, body.Key, 0, "")
-		c.JSON(200, gin.H{"upload_url": url, "method": "PUT", "bucket": *p.MinioBucket})
+		encPath := miniox.EncodePathSegments(body.Key)
+		relUpload := fmt.Sprintf("/v1/projects/%s/storage/objects/%s", pid.String(), encPath)
+		c.JSON(200, gin.H{
+			"upload_url": relUpload,
+			"method":     "PUT",
+			"bucket":     *p.MinioBucket,
+			"key":        body.Key,
+			"proxy":      true,
+		})
 	})
 
 	v1.POST("/projects/:pid/storage/download", middleware.RequirePermission("developer"), func(c *gin.Context) {
@@ -1296,20 +1346,19 @@ func main() {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", nil)
 			return
 		}
-		ex := time.Duration(body.Expires) * time.Second
-		if ex <= 0 {
-			ex = time.Hour
-		}
 		if err := miniox.ValidateObjectKey(body.Key); err != nil {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
 			return
 		}
-		url, err := miniox.PresignGet(c.Request.Context(), cfg, *p.MinioBucket, body.Key, ex)
-		if err != nil {
-			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
-			return
-		}
-		c.JSON(200, gin.H{"download_url": url, "method": "GET", "bucket": *p.MinioBucket})
+		encPath := miniox.EncodePathSegments(body.Key)
+		relDL := fmt.Sprintf("/v1/projects/%s/storage/objects/%s", pid.String(), encPath)
+		c.JSON(200, gin.H{
+			"download_url": relDL,
+			"method":       "GET",
+			"bucket":       *p.MinioBucket,
+			"key":          body.Key,
+			"proxy":        true,
+		})
 	})
 
 	// Phase 12 — bucket browser endpoints (PRD section 10).
@@ -1337,6 +1386,85 @@ func main() {
 		c.JSON(200, gin.H{"bucket": bucket, "objects": objects})
 	})
 
+	v1.GET("/projects/:pid/storage/objects/*key", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		p, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || p.MinioBucket == nil {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		raw := strings.TrimPrefix(c.Param("key"), "/")
+		key := miniox.DecodePathSegments(raw)
+		if err := miniox.ValidateObjectKey(key); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
+			return
+		}
+		obj, err := miniox.GetObjectReader(c.Request.Context(), cfg, *p.MinioBucket, key)
+		if err != nil {
+			minErr := minio.ToErrorResponse(err)
+			if minErr.Code == "NoSuchKey" {
+				httpx.Problem(c, bun, 404, "NOT_FOUND", nil)
+				return
+			}
+			slog.Error("storage get proxy", "err", err)
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		defer obj.Close()
+		stat, err := obj.Stat()
+		if err != nil {
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		ct := strings.TrimSpace(stat.ContentType)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		if stat.Size >= 0 {
+			c.Header("Content-Length", strconv.FormatInt(stat.Size, 10))
+		}
+		if stat.ETag != "" {
+			c.Header("ETag", stat.ETag)
+		}
+		c.Header("Cache-Control", "private, no-store")
+		c.DataFromReader(http.StatusOK, stat.Size, ct, obj, nil)
+	})
+
+	v1.PUT("/projects/:pid/storage/objects/*key", middleware.RequirePermission("developer"), func(c *gin.Context) {
+		pid := c.MustGet("project_id_route").(uuid.UUID)
+		p, err := st.ProjectByID(c.Request.Context(), pid)
+		if err != nil || p.MinioBucket == nil {
+			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
+			return
+		}
+		raw := strings.TrimPrefix(c.Param("key"), "/")
+		key := miniox.DecodePathSegments(raw)
+		if err := miniox.ValidateObjectKey(key); err != nil {
+			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
+			return
+		}
+		ct := strings.TrimSpace(c.GetHeader("Content-Type"))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		size := c.Request.ContentLength
+		ui, err := miniox.PutReader(c.Request.Context(), cfg, *p.MinioBucket, key, c.Request.Body, size, ct)
+		if err != nil {
+			slog.Error("storage put proxy", "err", err)
+			httpx.Problem(c, bun, 500, "INTERNAL_ERROR", nil)
+			return
+		}
+		etag := strings.Trim(ui.ETag, `"`)
+		_ = st.UpsertObject(c.Request.Context(), pid, *p.MinioBucket, key, ui.Size, etag)
+		var actor *uuid.UUID
+		if v, ok := c.Get(middleware.KeyUserUUID); ok {
+			u := v.(uuid.UUID)
+			actor = &u
+		}
+		_ = st.Audit(c.Request.Context(), &pid, actor, "object.upload", key, map[string]any{"size": ui.Size})
+		c.JSON(200, gin.H{"ok": true, "key": key, "size": ui.Size, "etag": etag})
+	})
+
 	v1.DELETE("/projects/:pid/storage/objects/*key", middleware.RequirePermission("developer"), func(c *gin.Context) {
 		pid := c.MustGet("project_id_route").(uuid.UUID)
 		p, err := st.ProjectByID(c.Request.Context(), pid)
@@ -1344,7 +1472,8 @@ func main() {
 			httpx.Problem(c, bun, 400, "PROVISIONING_PENDING", nil)
 			return
 		}
-		key := strings.TrimPrefix(c.Param("key"), "/")
+		raw := strings.TrimPrefix(c.Param("key"), "/")
+		key := miniox.DecodePathSegments(raw)
 		if err := miniox.ValidateObjectKey(key); err != nil {
 			httpx.Problem(c, bun, 400, "VALIDATION_ERROR", []apierr.FieldErr{{Field: "key", Message: bun.AsLocaleMsg("OBJECT_KEY_INVALID")}})
 			return

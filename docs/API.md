@@ -71,8 +71,10 @@ Project payload fields:
 
 | Endpoint | Roles | Description |
 | --- | --- | --- |
-| `POST /v1/projects/:pid/storage/upload` | developer | Create a presigned PUT URL. |
-| `POST /v1/projects/:pid/storage/download` | developer | Create a presigned GET URL. |
+| `POST /v1/projects/:pid/storage/upload` | developer | Returns an API-relative path; `PUT` that path with `Authorization: Bearer …` to upload bytes (backend proxies to MinIO). |
+| `PUT /v1/projects/:pid/storage/objects/*key` | developer | Upload or replace an object (streams body to the tenant bucket via the backend). |
+| `GET /v1/projects/:pid/storage/objects/*key` | developer | Download an object (streams from MinIO through the backend). |
+| `POST /v1/projects/:pid/storage/download` | developer | Returns an API-relative path for `GET` download via the same proxy (legacy clients that expected a presigned URL now receive a path under `/v1/...`). |
 
 Object keys must be safe paths (no leading `/`, no `..`, no control characters).
 
@@ -81,7 +83,8 @@ Object keys must be safe paths (no leading `/`, no `..`, no control characters).
 | Endpoint | Roles | Description |
 | --- | --- | --- |
 | `POST /v1/projects/:pid/functions` | developer | Create a function. A slug is generated from the name. |
-| `POST /v1/projects/:pid/functions/:fid/artifacts/presign` | developer | Presign artifact upload URL for a future version. |
+| `POST /v1/projects/:pid/functions/:fid/artifacts/presign` | developer | Returns an API-relative URL for artifact upload; `PUT` with Bearer token (backend proxies to MinIO). |
+| `PUT /v1/projects/:pid/functions/:fid/artifacts/upload?version=` | developer | Upload tarball bytes for the given version (same bucket path as presign). |
 | `POST /v1/projects/:pid/functions/:fid/versions` | developer | Register an immutable version. Duplicate versions return `409 VERSION_IMMUTABLE`. |
 | `GET /v1/projects/:pid/functions/:fid/versions/:vid/build` | developer | Read build status (`queued`, `complete`, or `failed`). |
 | `POST /v1/projects/:pid/functions/:fid/deploy` | developer | Deploy a complete version. Build must be `complete`. |

@@ -16,7 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { ProblemAlert } from '@/components/data/ProblemAlert';
 import { CopyButton } from '@/components/data/CopyButton';
 import { EmptyState } from '@/components/data/EmptyState';
-import { api, rawFetch } from '@/api/client';
+import { api, rawFetch, resolveApiHttpUrl, xhrApiHeaders } from '@/api/client';
 import { isProblem, ProblemError } from '@/api/problem';
 import { validateObjectKey } from '@/lib/objectKey';
 import { formatBytes, cn } from '@/lib/utils';
@@ -86,7 +86,16 @@ function UploadCard({ pid }: { pid: string }) {
     try {
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open(presigned.method || 'PUT', presigned.upload_url!, true);
+        const url = resolveApiHttpUrl(presigned.upload_url!);
+        xhr.open(presigned.method || 'PUT', url, true);
+        const headers = xhrApiHeaders();
+        Object.entries(headers).forEach(([k, v]) => {
+          xhr.setRequestHeader(k, v);
+        });
+        xhr.setRequestHeader(
+          'Content-Type',
+          file.type && file.type.length > 0 ? file.type : 'application/octet-stream',
+        );
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100));
         };
@@ -219,11 +228,42 @@ function ObjectsCard({ pid }: { pid: string }) {
         body: { key, expires: 3600 } as { key: string; expires: number },
       });
       if (error) throw error;
-      const url = (data as { download_url?: string; url?: string } | undefined) ?? {};
-      return url.download_url ?? url.url ?? '';
+      const row = (data as { download_url?: string; url?: string } | undefined) ?? {};
+      const dl = row.download_url ?? row.url ?? '';
+      if (!dl) throw new Error('No download path');
+      if (dl.startsWith('http://') || dl.startsWith('https://')) {
+        return { kind: 'redirect' as const, url: dl };
+      }
+      const res = await rawFetch(dl, { method: 'GET' });
+      if (!res.ok) {
+        const text = await res.text();
+        let body: unknown = null;
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch {
+            //
+          }
+        }
+        if (isProblem(body)) throw new ProblemError(res.status, body);
+        throw new Error('Download failed');
+      }
+      const blob = await res.blob();
+      return { kind: 'blob' as const, blob, filename: key.split('/').pop() ?? 'download' };
     },
-    onSuccess: (url) => {
-      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    onSuccess: (result) => {
+      if (result.kind === 'redirect') {
+        window.open(result.url, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      const url = URL.createObjectURL(result.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     },
   });
 
